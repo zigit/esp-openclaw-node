@@ -221,7 +221,7 @@ static esp_err_t waveshare_audio_open(
 void app_main(void)
 {
     const esp_openclaw_room_node_config_t config = {
-        .display_name = "OpenClaw AMOLED Room Node",
+        .display_name = "Waveshare AMOLED Room Node",
         .model_identifier = "waveshare-esp32-s3-touch-amoled-2.06",
         .display = {
             .start = waveshare_display_start,
