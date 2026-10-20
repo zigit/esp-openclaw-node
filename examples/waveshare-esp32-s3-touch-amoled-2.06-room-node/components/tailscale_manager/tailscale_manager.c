@@ -94,6 +94,8 @@ static void ts_start_echo_socket(microlink_t *ml)
  * The gateway name is priority-pinned into the 16-slot peer table, so the
  * entry survives churn. Called from the manager's CONNECTED tick until the
  * hook has the name; also re-checks if the peer table changes. */
+static microlink_t *s_ml = NULL;
+
 static void ts_dns_refresh_peer_table(void)
 {
     if (s_gateway_resolved || strlen(s_gateway_name) == 0 || !s_ml) return;
@@ -137,7 +139,6 @@ static bool ts_wifi_has_ip(void)
  * The resolved IP is registered in room_dns_hook so lwIP's netconn hook
  * resolves the gateway URI name with zero real-network DNS. */
 
-static microlink_t *s_ml = NULL;
 static volatile bool s_started = false;
 static volatile int s_last_state = -1;
 
