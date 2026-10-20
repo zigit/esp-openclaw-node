@@ -104,7 +104,7 @@ static void ts_dns_rx(microlink_udp_socket_t *sock, uint32_t src_ip,
         const char *ipat = strstr(buf, "\"ip\":");
         if (!ipat) return;
         const char *c = ipat + 5;
-        while (*c && *c != '"' && (*c < '0' || *c > '9')) c++;
+        while (*c && (*c < '0' || *c > '9')) c++;
         if (*c >= '0' && *c <= '9') {
             unsigned a, b, d, e;
             if (sscanf(c, "%u.%u.%u.%u", &a, &b, &d, &e) == 4 &&
