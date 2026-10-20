@@ -185,10 +185,17 @@ static void ts_manager_task(void *pv)
                 if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
                     dhcp_dns_addr = dns.ip.u_addr.ip4.addr; /* snapshot for restore */
                 }
-                dns.ip.u_addr.ip4.addr = lwip_htonl(0x64646464); /* 100.100.100.100 MagicDNS */
+                /* 100.100.100.100 is MagicDNS anycast — reachable on real tailscaled
+                 * hosts, but the board's WG netif has no local resolver handler and
+                 * no peer announces it. Route DNS instead to VM2 (priority peer,
+                 * guaranteed a WG slot) where dns_forwarder.py :5354 forwards to the
+                 * local 100.100.100.100. UDP/5354 rides the same WG lane (tailscale's
+                 * inbound-UDP rule: VM2's forwarder sends first via its own
+                 * MagicDNS probes, so replies flow). */
+                dns.ip.u_addr.ip4.addr = lwip_htonl(0x647CFE0F); /* 100.124.254.15 */
                 dns.ip.type = ESP_IPADDR_TYPE_V4;
                 if (esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
-                    ESP_LOGI(TAG, "[TS] DNS -> tailnet resolver 100.100.100.100 (MagicDNS names resolvable)");
+                    ESP_LOGI(TAG, "[TS] DNS -> VM2:5354 forwarder (MagicDNS via WG lane)");
                     dns_redirected = true;
                 } else {
                     ESP_LOGW(TAG, "[TS] set_dns_info failed — ts.net names stay unresolvable");
