@@ -36,8 +36,11 @@ CONFIG_LV_DRAW_BUF_ALIGN=16
 # Two node clients (node + operator role) each run a component task and a
 # websocket task, and all four stacks must be internal RAM. 12 KiB each cost
 # 48 KiB of the scarcest pool and starved websocket task creation once the
-# always-on audio pipeline was added; 8 KiB matches the IDF default.
-CONFIG_ESP_OPENCLAW_NODE_TASK_STACK_SIZE=8192
+# always-on audio pipeline was added; 8 KiB matched the IDF default until the
+# microlink tailnet lane joined the stack — after that the second (operator)
+# create saw int_largest=7680 and 8 KiB no longer fit; 7168 does (FIELD
+# 2026-10-20: operator create attempt verdicts in serial).
+CONFIG_ESP_OPENCLAW_NODE_TASK_STACK_SIZE=7168
 CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_STACK_SIZE=8192
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # PSRAM-first memory policy, matching every esp-webrtc-solution demo config

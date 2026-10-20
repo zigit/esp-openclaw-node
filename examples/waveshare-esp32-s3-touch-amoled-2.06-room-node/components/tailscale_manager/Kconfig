@@ -27,12 +27,13 @@ menu "Tailscale Manager"
             WireGuard slot even on a full peer table. 0/empty disables.
 
     config TS_GATEWAY_DNS_NAME
-        string "Gateway hostname the echo-lane resolver pins (e.g. the ts.net name)"
+        string "Gateway hostname pinned from the tailnet peer table (e.g. ts.net name)"
         default "wss://openclaws-virtual-machine-2.tailbdd5a.ts.net"
         help
-            Scheme and port are stripped automatically. ts_manager asks VM2's
-            dns lane (:5200 keepalive-primed responder) for this name's A
-            record and registers it into lwIP's netconn external-resolve hook —
-            MagicDNS names resolve with zero real-network DNS. Empty disables.
+            Scheme and port are stripped automatically. ts_manager resolves this
+            name with microlink_resolve() — the coord-map peer table already
+            carries every peer's hostname+VPN IP (NVS-cached, no network I/O) —
+            and registers the answer into lwIP's netconn external-resolve hook,
+            so MagicDNS names resolve with zero real-network DNS. Empty disables.
 
 endmenu
