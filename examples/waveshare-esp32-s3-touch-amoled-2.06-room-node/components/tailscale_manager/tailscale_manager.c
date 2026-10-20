@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "lwip/inet.h" /* esp_htonl */
 
 #include "microlink.h"
 #include "esp_netif.h"
