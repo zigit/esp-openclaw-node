@@ -1663,6 +1663,41 @@ void ml_wg_mgr_task(void *arg) {
         /* Update VPN IP if coord already set it */
         wg_update_vpn_ip(ml);
         xEventGroupSetBits(ml->events, ML_EVT_WG_READY);
+
+        /* FIELD 2026-10-20 (room node / DNS-over-WG): cached peers loaded from
+         * NVS pre-registration carry wg_peer_index = -1 and were never pushed
+         * into the wireguardif — the wg netif had zero peers, so every
+         * outbound 100.x (DNS to the VM2 forwarder) hit peer_lookup and died
+         * with ERR_CONN ('No valid keys'). Re-run each cached peer through the
+         * wireguardif-add path so sessions can be established (handshake via
+         * DERP endpoint from the stored endpoints). */
+        {
+            int readded = 0;
+            for (int i = 0; i < ML_MAX_PEERS; i++) {
+                ml_peer_t *p = &ml->peers[i];
+                if (!p->active || p->wg_peer_index >= 0) continue;
+                uint32_t pip = p->vpn_ip;
+                if (pip == 0) continue;
+                ml_peer_update_t upd = {0};
+                upd.action = ML_PEER_ADD;
+                memcpy(upd.public_key, p->public_key, sizeof(upd.public_key));
+                memcpy(upd.disco_key, p->disco_key, sizeof(upd.disco_key));
+                strlcpy(upd.hostname, p->hostname, sizeof(upd.hostname));
+                upd.derp_region = p->derp_region;
+                upd.vpn_ip = pip;
+                if (p->endpoint_count > 0) {
+                    upd.endpoint_count = p->endpoint_count;
+                    for (int e = 0; e < p->endpoint_count; e++) {
+                        upd.endpoints[e].ip = p->endpoints[e].ip;
+                        upd.endpoints[e].port = p->endpoints[e].port;
+                        upd.endpoints[e].is_ipv6 = p->endpoints[e].is_ipv6;
+                    }
+                }
+                if (add_peer(ml, &upd) >= 0) readded++;
+            }
+            ESP_LOGI(TAG, "Cached-peer re-add: %d/%d wireguardif slots wired",
+                     readded, ml->peer_count);
+        }
     }
 
     ESP_LOGI(TAG, "Accepting peer updates");
