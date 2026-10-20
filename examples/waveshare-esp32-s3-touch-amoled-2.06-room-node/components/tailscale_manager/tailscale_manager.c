@@ -50,9 +50,14 @@ static void ts_quiet_logs(void)
     esp_log_level_set("ml_h2", ESP_LOG_WARN);
 }
 
-/* Echo socket on the canonical spike port: keeps the daemon's data-plane
- * monitor (tailscaleTransport) alive against voice fw — same UDP lane the
- * spike app used, so the architecture test survives the firmware swap.
+#define TS_DNS_LANE_PORT 5200
+static char s_gateway_name[96];
+static microlink_udp_socket_t *s_dns_sock = NULL;
+static volatile bool s_gateway_resolved = false;
+
+/* Echo socket on the canonical spike port: keeps the gateway-side monitor
+ * alive against voice fw — same UDP lane the spike app used, so the
+ * architecture test survives the firmware swap.
  * Microlink routes it through WireGuard automatically. */
 #define TS_ECHO_PORT 9000
 static microlink_udp_socket_t *s_echo_sock = NULL;
@@ -167,10 +172,6 @@ static bool ts_wifi_has_ip(void)
  * resolved gateway IP is registered in room_dns_hook so lwIP's netconn
  * hook resolves the gateway URI name with zero real-network DNS. */
 #define TS_DNS_LANE_PORT 5200
-static char s_gateway_name[96];
-static microlink_udp_socket_t *s_dns_sock = NULL;
-static volatile bool s_gateway_resolved = false;
-
 static microlink_t *s_ml = NULL;
 static volatile bool s_started = false;
 static volatile int s_last_state = -1;

@@ -9,6 +9,7 @@
 #include "lwip/arch.h"
 #include "lwip/err.h"
 #include "lwip/ip_addr.h"
+#include "lwip/dns.h" /* LWIP_DNS_ADDRTYPE_* */
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
