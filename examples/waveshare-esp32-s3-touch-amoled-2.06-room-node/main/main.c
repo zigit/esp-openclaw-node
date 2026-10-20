@@ -1,4 +1,5 @@
 #include "esp_openclaw_room_node.h"
+#include "tailscale_manager.h"
 
 #include "bsp/esp-bsp.h"
 #include "esp_check.h"
@@ -247,4 +248,10 @@ void app_main(void)
         },
     };
     ESP_ERROR_CHECK(esp_openclaw_room_node_start(&config));
+
+    /* Tailnet lane: connectivity layer only — the gateway URI and its
+     * credentials stay provisioning items (NVS, USB setup flow). The
+     * manager is flag-gated (CONFIG_TS_ENABLE) and no-ops when disabled;
+     * it waits internally for the room node's station to hold an address. */
+    ESP_ERROR_CHECK(tailscale_manager_start());
 }

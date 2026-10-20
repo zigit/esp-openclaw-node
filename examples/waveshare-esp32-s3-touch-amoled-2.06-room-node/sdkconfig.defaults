@@ -58,3 +58,13 @@ CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY=11
 # MB/s against a ~25 MB/s panel budget. Fast saccades visibly smooth out.
 CONFIG_LV_DEF_REFR_PERIOD=16
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+
+# --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
+CONFIG_TS_ENABLE=y
+# wireguard_lwip links mbedtls_chachapoly_*; kconfgen only fills ABSENT symbols,
+# so these pins apply only to fresh checkouts — the existing generated sdkconfig
+# must be sed'd at the authoritative layer (field trap, 3 instances).
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+# NOTE: CONFIG_TS_AUTH_KEY belongs ONLY in the git-ignored sdkconfig.credentials overlay.

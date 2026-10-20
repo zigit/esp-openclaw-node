@@ -1,0 +1,29 @@
+menu "Tailscale Manager"
+
+    config TS_ENABLE
+        bool "Enable tailscale lane (microlink)"
+        default n
+        help
+            Runs the microlink Tailscale client alongside the voice stack.
+            The AMOLED example does not require this component; only boards
+            that call tailscale_manager_start() with TS_ENABLE=y build the
+            microlink+wireguard_lwip objects in.
+
+    config TS_AUTH_KEY
+        string "Tailscale auth key (tskey-auth-...)"
+        default "tskey-auth-XXXXX-put-real-key-in-overlay-XXXXXXXXXXXXXXXXXXXX"
+        help
+            Only needed when the board must REGISTER fresh (empty NVS or key
+            expiry). The board keeps its machine keys in NVS across reflash
+            (NVS partition identical), so an already-registered board needs
+            no valid key. Real value belongs in the git-ignored
+            sdkconfig.credentials overlay.
+
+    config TS_PRIORITY_PEER_IP
+        string "Priority peer VPN IP (guaranteed WG slot, e.g. the daemon)"
+        default "100.124.254.15"
+        help
+            VM2 (openclaws-virtual-machine-2) — the daemon always gets a
+            WireGuard slot even on a full peer table. 0/empty disables.
+
+endmenu
