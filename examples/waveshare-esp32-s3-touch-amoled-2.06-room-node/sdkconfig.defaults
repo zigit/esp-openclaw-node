@@ -61,6 +61,10 @@ CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY=11
 # MB/s against a ~25 MB/s panel budget. Fast saccades visibly smooth out.
 CONFIG_LV_DEF_REFR_PERIOD=16
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+# 2026-10-21: decoded WDT traces (ELF addr2line) show pc_task/WebRTC recv
+# (agent_recv_one_packet, srtp_unprotect, rtp_jitter_add) plus taskLVGL redraw
+# also starving IDLE1 during calls — same call-load signature as CPU0.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 
 # --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
 CONFIG_TS_ENABLE=y
