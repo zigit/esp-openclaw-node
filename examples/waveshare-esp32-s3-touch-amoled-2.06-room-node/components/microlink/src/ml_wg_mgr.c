@@ -1710,9 +1710,11 @@ void ml_wg_mgr_task(void *arg) {
                     p->wg_peer_index < 0 || ml->wg_netif == NULL) continue;
                 wireguardif_connect((struct netif *)ml->wg_netif,
                                     (u8_t)p->wg_peer_index);
-                struct wireguard_device *dev = (struct wireguard_device *)ml->wg_netif->state;
-                if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
-                    dev->peers[p->wg_peer_index].active = false;
+                {
+                    struct wireguard_device *dev = (struct wireguard_device *)((struct netif *)ml->wg_netif)->state;
+                    if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+                        dev->peers[p->wg_peer_index].active = false;
+                    }
                 }
                 // NOLINTNEXTLINE(readability-implicit-bool-conversion)
                 char pipbuf[16];
