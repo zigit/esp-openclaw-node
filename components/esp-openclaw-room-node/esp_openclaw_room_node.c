@@ -733,6 +733,14 @@ static void record_operator_session_result(esp_err_t err)
 
 static esp_err_t start_operator_client(void)
 {
+    /* FIELD 2026-10-20 (room node + tailscale): create could NO_MEM deep in
+     * internal-RAM pressure (microlink lane + TLS + AFE live). One WARN line
+     * with the heap verdict per attempt makes the retry loop diagnosable. */
+    ESP_LOGW("openclaw_room",
+             "operator create attempt: int_free=%lu int_largest=%lu psram_free=%lu",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     xSemaphoreTake(state_lock, portMAX_DELAY);
     esp_openclaw_node_handle_t existing = operator_client;
     xSemaphoreGive(state_lock);
