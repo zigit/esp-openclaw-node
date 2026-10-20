@@ -237,8 +237,23 @@ static void ts_manager_task(void *pv)
             if (ip) {
                 char ipbuf[16];
                 microlink_ip_to_str(ip, ipbuf);
-                ESP_LOGI(TAG, "[TS] heartbeatalive %s peers=%d",
-                         ipbuf, microlink_get_peer_count(s_ml));
+                int np = microlink_get_peer_count(s_ml);
+                /* FIELD 2026-10-20: peer-table reality dump (heartbeat rate).
+                 * microlink's own peer-state logging is pinned to WARN, so the
+                 * only serial-visible window into the WG plane is this line.
+                 * Shows which peers hold wg slots + direct paths — the DNS-over-WG
+                 * unblock verification reads VM2's entry here. */
+                static char peers_desc[480];
+                int off = 0;
+                for (int i = 0; i < np && off < (int)sizeof(peers_desc) - 24; i++) {
+                    microlink_peer_info_t info;
+                    if (microlink_get_peer_info(s_ml, i, &info) != ESP_OK) continue;
+                    char pb[16];
+                    microlink_ip_to_str(info.vpn_ip, pb);
+                    off += snprintf(peers_desc + off, sizeof(peers_desc) - off,
+                                    "%s[%d]=%s:dp%d", i ? " " : "", i, pb, info.direct_path);
+                }
+                ESP_LOGI(TAG, "[TS] heartbeatalive %s peers=%d | %s", ipbuf, np, peers_desc);
             }
             hb = 0;
         }
