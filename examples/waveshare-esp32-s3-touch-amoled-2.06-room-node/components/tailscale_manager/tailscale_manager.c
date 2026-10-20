@@ -185,7 +185,7 @@ static void ts_manager_task(void *pv)
                 if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
                     dhcp_dns_addr = dns.ip.u_addr.ip4.addr; /* snapshot for restore */
                 }
-                dns.ip.u_addr.ip4.addr = esp_htonl(0x64646464); /* 100.100.100.100 MagicDNS */
+                dns.ip.u_addr.ip4.addr = lwip_htonl(0x64646464); /* 100.100.100.100 MagicDNS */
                 dns.ip.type = ESP_IPADDR_TYPE_V4;
                 if (esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
                     ESP_LOGI(TAG, "[TS] DNS -> tailnet resolver 100.100.100.100 (MagicDNS names resolvable)");
