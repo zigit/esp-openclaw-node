@@ -1697,6 +1697,28 @@ void ml_wg_mgr_task(void *arg) {
             }
             ESP_LOGI(TAG, "Cached-peer re-add: %d/%d wireguardif slots wired",
                      readded, ml->peer_count);
+
+            /* PRIORITY-PEER session bootstrap (DNS-over-WG unblock): the board
+             * is the initiator for its own gateway traffic, but handshakes
+             * otherwise wait for DISCO direct-path discovery or peer-initiated
+             * traffic. Fire a one-shot handshake to the priority peer now
+             * (endpoint comes from the cached endpoints / DERP region), then
+             * park it inactive like the DISCO one-shot to avoid retry loops. */
+            for (int i = 0; i < ML_MAX_PEERS; i++) {
+                ml_peer_t *p = &ml->peers[i];
+                if (!p->active || p->vpn_ip != ml->config.priority_peer_ip ||
+                    p->wg_peer_index < 0 || ml->wg_netif == NULL) continue;
+                wireguardif_connect((struct netif *)ml->wg_netif,
+                                    (u8_t)p->wg_peer_index);
+                struct wireguard_device *dev = (struct wireguard_device *)ml->wg_netif->state;
+                if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+                    dev->peers[p->wg_peer_index].active = false;
+                }
+                // NOLINTNEXTLINE(readability-implicit-bool-conversion)
+                char pipbuf[16];
+                microlink_ip_to_str(p->vpn_ip, pipbuf);
+                ESP_LOGI(TAG, "Priority-peer handshake fired (one-shot, VPN IP %s)", pipbuf);
+            }
         }
     }
 
