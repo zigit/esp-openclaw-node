@@ -278,7 +278,8 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
 #else
             printf("[WG_OUTCB] inner %uB dst=%u.%u.%u.%u:%u res=%d int=%lu (stats off)\n",
                    (unsigned)len,
-                   (dip >> 24) & 255, (dip >> 16) & 255, (dip >> 8) & 255, dip & 255,
+                   (unsigned)((dip >> 24) & 255), (unsigned)((dip >> 16) & 255),
+                   (unsigned)((dip >> 8) & 255), (unsigned)(dip & 255),
                    (unsigned)dest_port, err,
                    (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #endif
