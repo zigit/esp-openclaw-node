@@ -165,10 +165,45 @@ static void ts_manager_task(void *pv)
      * provisioning item. */
     bool echo_up = false;
     bool was_connected = false;
+    bool dns_redirected = false;
+    uint32_t dhcp_dns_addr = 0; /* pre-redirect MAIN DNS, restored on lane loss */
     int hb = 0;
     for (;;) {
         microlink_state_t st = microlink_get_state(s_ml);
         bool connected_now = (st == ML_STATE_CONNECTED);
+        /* FIELD 2026-10-20: the gateway URI is a MagicDNS name
+         * (*.ts.net) — the LAN DHCP resolver cannot answer it (resolver
+         * answers only inside the tailnet at 100.100.100.100). Once the WG
+         * lane is CONNECTED the tailnet carries DNS-UDP to the resolver, so
+         * switch the station's DNS server there; restored to DHCP on lane
+         * loss. */
+        if (connected_now && !dns_redirected) {
+            esp_netif_t *netif = esp_netif_get_default_netif();
+            if (netif) {
+                esp_netif_dns_info_t dns = {0};
+                if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+                    dhcp_dns_addr = dns.ip.u_addr.ip4.addr; /* snapshot for restore */
+                }
+                dns.ip.u_addr.ip4.addr = esp_htonl(0x64646464); /* 100.100.100.100 MagicDNS */
+                dns.ip.type = ESP_IPADDR_TYPE_V4;
+                if (esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+                    ESP_LOGI(TAG, "[TS] DNS -> tailnet resolver 100.100.100.100 (MagicDNS names resolvable)");
+                    dns_redirected = true;
+                } else {
+                    ESP_LOGW(TAG, "[TS] set_dns_info failed — ts.net names stay unresolvable");
+                }
+            }
+        } else if (!connected_now && dns_redirected) {
+            esp_netif_t *netif = esp_netif_get_default_netif();
+            if (netif) {
+                esp_netif_dns_info_t dns = {0};
+                dns.ip.u_addr.ip4.addr = dhcp_dns_addr;
+                dns.ip.type = ESP_IPADDR_TYPE_V4;
+                esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+            }
+            dns_redirected = false;
+            ESP_LOGI(TAG, "[TS] DNS restored to pre-redirect resolver (lane down)");
+        }
         if (was_connected && !connected_now) {
             echo_up = false;
             /* FIELD 2026-10-19 05:50 crash-chain fix: CLOSE the echo socket
