@@ -1,5 +1,6 @@
 set(SRCS
     "tailscale_manager.c"
+    "src/room_dns_hook.c"
 )
 
 set(REQUIRES

@@ -26,6 +26,7 @@
 
 #include "microlink.h"
 #include "esp_netif.h"
+#include "room_dns_hook.h"
 
 /* sdkconfig.h defines bool Kconfig symbols only when set — provide the
  * zero fallback so && CONFIG_TS_VOICE_PRIMARY compiles at TS_ENABLE=n. */
@@ -81,6 +82,64 @@ static void ts_start_echo_socket(microlink_t *ml)
     ESP_LOGI(TAG, "[TS] echo lane up on udp/%d (daemon monitor target)", TS_ECHO_PORT);
 }
 
+static void ts_dns_rx(microlink_udp_socket_t *sock, uint32_t src_ip,
+                      uint16_t src_port, const uint8_t *data, size_t len,
+                      void *user_data)
+{
+    (void)user_data;
+    if (len == 0 || len > 400) return;
+    char buf[400];
+    size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    memcpy(buf, data, n);
+    buf[n] = '\0';
+
+    if (!s_gateway_resolved && strlen(s_gateway_name) > 0 &&
+        strstr(buf, s_gateway_name) != NULL) {
+        /* {"t":"dns","name":...,"ip":"a.b.c.d"|null} */
+        const char *ipat = strstr(buf, "\"ip\":");
+        if (!ipat) return;
+        const char *c = ipat + 5;
+        while (*c && *c != '"' && (*c < '0' || *c > '9')) c++;
+        if (*c >= '0' && *c <= '9') {
+            unsigned a, b, d, e;
+            if (sscanf(c, "%u.%u.%u.%u", &a, &b, &d, &e) == 4 &&
+                a < 256 && b < 256 && d < 256 && e < 256) {
+                uint32_t ip = (a << 24) | (b << 16) | (d << 8) | e;
+                room_dns_hook_set(s_gateway_name, ip);
+                s_gateway_resolved = true;
+                ESP_LOGI(TAG, "[TS] gateway name resolved via lane: %u.%u.%u.%u",
+                         a, b, d, e);
+            }
+        } else {
+            ESP_LOGW(TAG, "[TS] lane resolver reports no record for %s", s_gateway_name);
+        }
+        return;
+    }
+    /* keepalives (and anything else): answer carries the pending dns request */
+    if (!s_gateway_resolved && strlen(s_gateway_name) > 0) {
+        char req[160];
+        int rn = snprintf(req, sizeof(req),
+                          "{\"t\":\"dns\",\"name\":\"%s\"}", s_gateway_name);
+        if (rn > 0 && (size_t)rn < sizeof(req)) {
+            microlink_udp_send(sock, src_ip, src_port, (const uint8_t *)req, (size_t)rn);
+        }
+    }
+}
+
+static void ts_start_dns_lane(microlink_t *ml)
+{
+    if (s_dns_sock || s_gateway_resolved) return;
+    if (strlen(s_gateway_name) == 0) return; /* no name configured */
+    s_dns_sock = microlink_udp_create(ml, TS_DNS_LANE_PORT);
+    if (!s_dns_sock) {
+        ESP_LOGW(TAG, "[TS] dns lane socket create failed (lane resolver stays dark)");
+        return;
+    }
+    microlink_udp_set_rx_callback(s_dns_sock, ts_dns_rx, NULL);
+    ESP_LOGI(TAG, "[TS] dns lane up on udp/%d (keepalive-primed both sides)",
+             TS_DNS_LANE_PORT);
+}
+
 /* esp-openclaw-node adaptation: the room node owns its WiFi station
  * internally (esp_openclaw_room_node.c registers WIFI_EVENT/IP_EVENT
  * handlers); there is no wifi_manager to poll. The equivalent ready
@@ -99,6 +158,18 @@ static bool ts_wifi_has_ip(void)
 }
 
 #define TS_HEARTBEAT_TICKS 60   /* 60s at 1s poll */
+
+/* DNS lane (fixed port BOTH sides — field-proven symmetric-flow pattern):
+ * VM2's room_dns_lane.py sends keepalives TO this port first (warms the
+ * tailnet netstack's inbound rule); ts_manager answers on the same socket,
+ * so its dns request rides as a reply in the reverse tuple — always
+ * deliverable — and the responder's dns answer rides back warm. The
+ * resolved gateway IP is registered in room_dns_hook so lwIP's netconn
+ * hook resolves the gateway URI name with zero real-network DNS. */
+#define TS_DNS_LANE_PORT 5200
+static char s_gateway_name[96];
+static microlink_udp_socket_t *s_dns_sock = NULL;
+static volatile bool s_gateway_resolved = false;
 
 static microlink_t *s_ml = NULL;
 static volatile bool s_started = false;
@@ -141,6 +212,18 @@ static void ts_manager_task(void *pv)
         char ipbuf[16];
         microlink_ip_to_str(cfg.priority_peer_ip, ipbuf);
         ESP_LOGI(TAG, "[TS] priority peer: %s", ipbuf);
+    }
+    /* Gateway name for the echo-lane resolver: Kconfig, stripped of scheme +
+     * port ("wss://name:443" → "name"). Falls back to empty (lane idles). */
+    {
+        const char *g = CONFIG_TS_GATEWAY_DNS_NAME;
+        const char *s = strstr(g, "://");
+        if (s) g = s + 3;
+        if (g[0] != '\0') {
+            strlcpy(s_gateway_name, g, sizeof(s_gateway_name));
+            char *slash = strchr(s_gateway_name, '/');
+            if (slash) *slash = '\0';
+        }
     }
 
     s_ml = microlink_init(&cfg);
@@ -226,6 +309,7 @@ static void ts_manager_task(void *pv)
         was_connected = connected_now;
         if (!echo_up && microlink_is_connected(s_ml)) {
             ts_start_echo_socket(s_ml);
+            ts_start_dns_lane(s_ml);
             echo_up = true;
         }
         if ((int)st != s_last_state) {
