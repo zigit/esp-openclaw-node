@@ -1795,6 +1795,8 @@ void ml_wg_mgr_task(void *arg) {
 
     uint64_t last_disco_probe_ms = 0;
     uint64_t last_wg_periodic_ms = 0;
+    /* FIELD 2026-10-21: cadence for the periodic handshake-retry sweep. */
+    uint64_t last_handshake_retry_ms = 0;
     bool derp_was_connected = false;
     bool stun_cmm_sent = false;  /* One-shot: send CMMs after first STUN result */
 
@@ -1886,10 +1888,39 @@ void ml_wg_mgr_task(void *arg) {
         now = ml_get_time_ms();
         if (now - last_disco_probe_ms > 1000) {
             uint64_t t0 = now;
-            disco_periodic_probes(ml);
-            uint64_t dt = ml_get_time_ms() - t0;
+            disco_periodic_probes(ml);            uint64_t dt = ml_get_time_ms() - t0;
             last_disco_probe_ms = now;
             ESP_LOGI(TAG, "disco_periodic_probes: %llu ms", (unsigned long long)dt);
+        }
+
+        /* FIELD 2026-10-21: periodic handshake RETRY for peers whose tunnel
+         * never came up. The one-shot 'tried_initial_handshake' means a
+         * failed handshake is never retried, so the peer stays keypair-less
+         * forever — observed as '[WG_OUTPUT] output_to_peer: keypair unusable
+         * (valid=0 initiator=0 last_rx=0)' for the MEDIA peer, whose ICE
+         * binding keepalives (40B) then could not be sent, which killed the
+         * call at ~40s ('Peer not response for binding after 30000').
+         * ml_wg_mgr_trigger_handshake() does both paths (DERP relay + direct
+         * UDP) and skips peers whose session is already up. Rate-limited to
+         * one attempt per peer per 15s so it cannot become the unbounded
+         * 5s-retry loop the 'WG voice lane start failed xN' defect had. */
+        if (ml->wg_netif && now - last_handshake_retry_ms >= 5000) {
+            last_handshake_retry_ms = now;
+            for (int i = 0; i < ml->peer_count && i < ML_MAX_PEERS; i++) {
+                ml_peer_t *p = &ml->peers[i];
+                if (!p->active || p->wg_peer_index < 0) continue;
+                if (p->vpn_ip == 0) continue;
+                if (now - p->last_handshake_retry_ms < 15000) continue;
+                err_t up = wireguardif_peer_is_up(
+                    (struct netif *)ml->wg_netif,
+                    (u8_t)p->wg_peer_index, NULL, NULL);
+                if (up == ERR_OK) continue;   /* tunnel healthy */
+                p->last_handshake_retry_ms = now;
+                (void)ml_wg_mgr_trigger_handshake(ml, p->vpn_ip);
+                ESP_LOGW(TAG,
+                    "WG handshake retry for %s (%u) — tunnel not up",
+                    p->hostname, (unsigned)p->vpn_ip);
+            }
         }
 
         /* Yield - 10ms loop rate for minimum packet processing latency.

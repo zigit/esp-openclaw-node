@@ -291,6 +291,12 @@ typedef struct {
 
     /* On-demand handshake: tried once on first DISCO direct path discovery */
     bool tried_initial_handshake;
+    /* FIELD 2026-10-21: last automatic handshake retry for this peer. The
+     * one-shot flag above means a FAILED handshake never recovers, so a peer
+     * whose tunnel never came up stays keypair-less forever (observed:
+     * 'keypair unusable valid=0 initiator=0 last_rx=0' for the media peer,
+     * which is what killed the ICE binding keepalive and the call). */
+    uint64_t last_handshake_retry_ms;
 } ml_peer_t;
 
 /* ============================================================================
