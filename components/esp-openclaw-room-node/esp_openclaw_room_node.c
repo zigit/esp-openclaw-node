@@ -10,6 +10,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "room_heap_census.h"
 #include "esp_netif.h"
 #include "esp_rom_sys.h"
 #include "esp_openclaw_node.h"
@@ -417,6 +418,7 @@ static void talk_teardown_task(void *arg)
          * is finished. Pending RPC refs may survive, but cannot dispatch. */
         talk_stage(generation, "stop_request", "consumed", 0);
         talk_audio_snapshot(generation, "teardown");
+        room_heap_census_log("teardown_begin");
         talk_stage(generation, "quiesce", "begin", 0);
         esp_openclaw_talk_call_quiesce(call);
         talk_stage(generation, "quiesce", "end", 0);
@@ -429,6 +431,7 @@ static void talk_teardown_task(void *arg)
             talk_stage(generation, "sdk_close", "begin", 0);
             int result = esp_webrtc_close(session);
             talk_stage(generation, "sdk_close", "end", result);
+            room_heap_census_log("sdk_close_end");
         }
         if (talk_ambient_suspended) {
             talk_stage(generation, "ambient_restore", "begin", 0);
@@ -457,6 +460,7 @@ static void talk_teardown_task(void *arg)
         talk_closing = false;
         xSemaphoreGive(state_lock);
         esp_openclaw_talk_call_release(call);
+        room_heap_census_log("teardown_end");
         refresh_home_facts();
         start_node_if_pending();
         start_operator_if_pending();

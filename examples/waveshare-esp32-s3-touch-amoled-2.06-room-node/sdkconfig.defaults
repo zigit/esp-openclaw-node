@@ -68,7 +68,10 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 # 2026-10-21 diagnostic: dual ws-abort fault snapshot — lwip_stats read in
 # esp_openclaw_node_lwip_diag_dump() at ws DISCONNECTED/ERROR with captured
 # TLS failure. Diagnostic build; revisit once the aborter is named.
+# diagnostic 2026-10-21: fault snapshot at ws transport failure
 CONFIG_LWIP_STATS=y
+# diagnostic 2026-10-21: task-stack high-water inventory in room_heap_census
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
 # --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
 CONFIG_TS_ENABLE=y
