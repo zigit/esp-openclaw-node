@@ -12,6 +12,7 @@
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_log.h"
+#include "room_heap_census.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -481,6 +482,7 @@ esp_err_t room_media_set_ambient_wake(bool enabled)
      * enabling the ambient sink reopens the source with WakeNet restored.
      */
     room_diagnostics_audio_set_capture_owner(ROOM_DIAGNOSTICS_CAPTURE_TRANSITION);
+    room_heap_census_log(enabled ? "afe_detach_begin" : "afe_reattach_begin");
     esp_capture_err_t source_err =
         room_capture_audio_aec_src_set_wakenet_enabled(audio_source, enabled);
     if (source_err != ESP_CAPTURE_ERR_OK) {
@@ -493,6 +495,7 @@ esp_err_t room_media_set_ambient_wake(bool enabled)
     esp_capture_err_t sink_err = esp_capture_sink_enable(wake_sink, mode);
     if (sink_err != ESP_CAPTURE_ERR_OK) {
         ESP_LOGE(TAG, "failed to %s ambient capture sink: %d", enabled ? "enable" : "disable", sink_err);
+        room_heap_census_log(enabled ? "afe_reattach_end_fail" : "afe_detach_end_fail");
         return ESP_FAIL;
     }
     ESP_LOGI(
@@ -500,6 +503,7 @@ esp_err_t room_media_set_ambient_wake(bool enabled)
         "%s owns capture; WakeNet %s for AFE reopen",
         enabled ? "ambient wake" : "Talk",
         enabled ? "enabled" : "disabled");
+    room_heap_census_log(enabled ? "afe_reattach_end" : "afe_detach_end");
     room_diagnostics_audio_set_capture_owner(
         enabled ? ROOM_DIAGNOSTICS_CAPTURE_AMBIENT : ROOM_DIAGNOSTICS_CAPTURE_TALK);
     return ESP_OK;
