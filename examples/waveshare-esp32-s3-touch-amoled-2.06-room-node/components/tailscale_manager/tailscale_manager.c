@@ -566,6 +566,17 @@ esp_err_t tailscale_manager_prepare_gateway(void)
     if (strlen(s_gateway_name) == 0) {
         return ESP_ERR_NOT_FOUND;
     }
+    /* NVS is initialized by the room node start, which runs AFTER this
+     * call — so the cache read would find an uninitialized store and
+     * report "not found" (13:46 field log: ESP_ERR_NOT_FOUND). nvs_flash_init
+     * is idempotent, so initializing here is safe; the room node's own
+     * call later still succeeds. */
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err != ESP_OK) {
+        ESP_LOGW(TAG, "[TS] nvs_flash_init for gateway cache failed: %s",
+                 esp_err_to_name(nvs_err));
+        return nvs_err;
+    }
     return ts_install_cached_gateway() ? ESP_OK : ESP_ERR_NOT_FOUND;
 #endif
 }
