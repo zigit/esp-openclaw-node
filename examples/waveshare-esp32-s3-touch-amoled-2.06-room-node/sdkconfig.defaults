@@ -72,9 +72,12 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 CONFIG_LWIP_STATS=y
 # diagnostic 2026-10-21: task-stack high-water inventory in room_heap_census
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
-# diagnostic 2026-10-21: per-task held-bytes attribution in room_heap_census —
-# names the subsystem holding the residual ~25-30 internal blocks per call.
-CONFIG_HEAP_TASK_TRACKING=y
+# VETOED 2026-10-21: CONFIG_HEAP_TASK_TRACKING=y broke lane bring-up — its per-block
+# tracking metadata shrank the early-boot internal heap so the mandatory-internal
+# ml_coord task could not spawn ("Failed to create coord task" -> microlink_start
+# ESP_FAIL -> DERP conn=0 forever -> MagicDNS dead -> node connect storm). Two boots
+# reproduced; reverted. Per-task attribution needs a different mechanism on this board.
+# CONFIG_HEAP_TASK_TRACKING is not set
 # 2026-10-21 stabilization: Tmr Svc stack overflow (panic via vApplicationStackOverflowHook
 # from vTaskSwitchContext) hit right after census teardown_end — the 2048-word default has
 # no headroom under heap pressure. 4096 words kills the crash class.
