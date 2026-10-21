@@ -621,6 +621,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                                             ml->peers[evict_idx].wg_peer_index);
                 }
                 ml->peers[evict_idx].active = false;
+                /* FIELD 2026-10-21: clear the slot index (the slot is
+                 * reused; a stale index points at another peer's entry). */
+                ml->peers[evict_idx].wg_peer_index = -1;
                 idx = evict_idx;
             }
         }
@@ -695,8 +698,18 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     ESP_LOGI(TAG, "Peer added disco_key=%s zero=%d", dk,
              (memcmp(p->disco_key, zero32, 32) == 0) ? 1 : 0);
 
-    /* Add to wireguard-lwip */
-    if (ml->wg_netif && !is_update) {
+    /* Add to wireguard-lwip.
+     * FIELD 2026-10-21: the condition is "does this peer already have a
+     * WireGuard slot", NOT "is this an update". A peer that is in our
+     * table but has no slot (loaded from NVS at boot, or evicted and
+     * re-added) MUST be wired in — skipping it leaves the device with no
+     * peer for its IP and every 100.x route dies with ERR_CONN. A peer
+     * that already holds a slot must NOT be re-added: that would create a
+     * second entry for the same public key, and
+     * peer_lookup_by_allowed_ip scans in order, so traffic could be handed
+     * to the stale one. */
+    bool already_wired = (p->wg_peer_index >= 0);
+    if (ml->wg_netif && !already_wired) {
         struct netif *netif = (struct netif *)ml->wg_netif;
 
         /* Convert peer public key to base64 */
