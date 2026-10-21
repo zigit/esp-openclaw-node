@@ -181,55 +181,13 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
 }
 
 int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers) {
-    return ml_peer_nvs_load_all_ex(peers, max_peers, 0);
-}
-
-/* FIELD 2026-10-21 (Fredrik): load the PRIORITY peer (the gateway) FIRST,
- * then fill the remaining slots. The room node only ever talks to the
- * gateway, but the NVS cache holds every tailnet peer, so the old
- * first-N order could load 16 tailnet peers and never the gateway —
- * and the table would then evict the gateway (the one peer we need)
- * under churn. */
-int ml_peer_nvs_load_all_ex(ml_peer_t *peers, int max_peers,
-                             uint32_t priority_vpn_ip) {
     if (!s_initialized || !peers || !s_table) return 0;
     if (s_table->count == 0) return 0;
 
     int loaded = 0;
-    /* Pass 1: the priority peer, so it always occupies slot 0. */
-    if (priority_vpn_ip != 0) {
-        for (int i = 0; i < s_table->count; i++) {
-            peer_nvs_entry_t *entry = &s_table->entries[i];
-            if (entry->vpn_ip != priority_vpn_ip) continue;
-            ml_peer_t *p = &peers[loaded];
-            memset(p, 0, sizeof(ml_peer_t));
-            p->vpn_ip = entry->vpn_ip;
-            memcpy(p->public_key, entry->public_key, 32);
-            memcpy(p->disco_key, entry->disco_key, 32);
-            p->derp_region = entry->derp_region;
-            p->active = true;
-            p->wg_peer_index = -1;
-            memcpy(p->hostname, entry->hostname_short, sizeof(entry->hostname_short));
-            p->hostname[sizeof(entry->hostname_short)] = '\0';
-            p->endpoint_count = entry->endpoint_count;
-            for (int j = 0; j < entry->endpoint_count && j < 2; j++) {
-                p->endpoints[j].ip = entry->endpoints[j].ip;
-                p->endpoints[j].port = entry->endpoints[j].port;
-                p->endpoints[j].is_ipv6 = false;
-            }
-            loaded++;
-            char ip_str[16];
-            microlink_ip_to_str(p->vpn_ip, ip_str);
-            ESP_LOGI(TAG, "Loaded cached peer (priority): %s (%s)",
-                     p->hostname, ip_str);
-            break;
-        }
-    }
-    /* Pass 2: the rest, up to the cap. */
     for (int i = 0; i < s_table->count && loaded < max_peers; i++) {
         peer_nvs_entry_t *entry = &s_table->entries[i];
         if (entry->vpn_ip == 0) continue;
-        if (priority_vpn_ip != 0 && entry->vpn_ip == priority_vpn_ip) continue;
 
         ml_peer_t *p = &peers[loaded];
         memset(p, 0, sizeof(ml_peer_t));
@@ -260,7 +218,7 @@ int ml_peer_nvs_load_all_ex(ml_peer_t *peers, int max_peers,
         ESP_LOGI(TAG, "Loaded cached peer: %s (%s)", p->hostname, ip_str);
     }
 
-    ESP_LOGI(TAG, "Loaded %d cached peers from NVS (cap %d)", loaded, max_peers);
+    ESP_LOGI(TAG, "Loaded %d cached peers from NVS", loaded);
     return loaded;
 }
 

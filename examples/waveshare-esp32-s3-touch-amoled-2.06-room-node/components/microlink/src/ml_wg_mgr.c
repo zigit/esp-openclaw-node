@@ -1718,21 +1718,11 @@ void ml_wg_mgr_task(void *arg) {
     /* Initialize probe tracking */
     memset(pending_probes, 0, sizeof(pending_probes));
 
-    /* Load cached peers from NVS for fast boot.
-     * FIELD 2026-10-21 (Fredrik): honour the configured cap and load the
-     * PRIORITY peer (the gateway) first. This used to pass ML_MAX_PEERS
-     * (16), so the whole tailnet flooded the table at boot ('Loaded 16
-     * cached peers from NVS') even though the room node talks to ONE peer
-     * and asked for max_peers=4 — and the table then evicted the gateway
-     * under churn, which is how the media peer's tunnel kept dying. */
-    int peer_slots = ml->config.max_peers > 0 ? ml->config.max_peers : ML_MAX_PEERS;
-    if (peer_slots > ML_MAX_PEERS) peer_slots = ML_MAX_PEERS;
-    int cached = ml_peer_nvs_load_all_ex(ml->peers, peer_slots,
-                                        ml->config.priority_peer_ip);
+    /* Load cached peers from NVS for fast boot */
+    int cached = ml_peer_nvs_load_all(ml->peers, ML_MAX_PEERS);
     if (cached > 0) {
         ml->peer_count = cached;
-        ESP_LOGI(TAG, "Pre-loaded %d cached peers from NVS (cap %d, priority %u)",
-                 cached, peer_slots, (unsigned)ml->config.priority_peer_ip);
+        ESP_LOGI(TAG, "Pre-loaded %d cached peers from NVS", cached);
     }
 
     /* Wait for registration OR shutdown before proceeding */

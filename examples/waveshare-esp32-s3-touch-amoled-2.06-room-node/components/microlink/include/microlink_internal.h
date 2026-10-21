@@ -559,13 +559,6 @@ esp_err_t ml_peer_nvs_init(void);
 void ml_peer_nvs_deinit(void);
 esp_err_t ml_peer_nvs_save(const ml_peer_t *peer);
 int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers);
-/* FIELD 2026-10-21 (Fredrik): load the priority peer FIRST, then fill up to
- * max_peers. The NVS cache holds every tailnet peer; the room node only
- * talks to the gateway, so the plain first-N order could load 16 tailnet
- * peers and never the gateway — and the table then evicted the one peer
- * we need. */
-int ml_peer_nvs_load_all_ex(ml_peer_t *peers, int max_peers,
-                             uint32_t priority_vpn_ip);
 esp_err_t ml_peer_nvs_clear(void);
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
