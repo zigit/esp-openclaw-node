@@ -25,7 +25,13 @@
 #define ESP_OPENCLAW_NODE_TAG                         "esp_openclaw_node"
 #define ESP_OPENCLAW_NODE_CONNECT_TIMEOUT_MS          12000LL
 #define ESP_OPENCLAW_NODE_WS_PING_INTERVAL_SEC        5
-#define ESP_OPENCLAW_NODE_WS_PINGPONG_TIMEOUT_SEC     30
+/* FIELD 2026-10-21: 30s was too tight for a voice call — the gateway is busy
+ * streaming the reply (a 'count to ten' answer runs ~40s) and its ws server
+ * does not service the PING promptly, so the client saw a 30s PONG gap and
+ * aborted its own healthy socket. 90s tolerates a full reply plus margin;
+ * the TCP keepalive below (10/5/5 -> 35s floor) is the real liveness
+ * guard, this is the application-level backstop. */
+#define ESP_OPENCLAW_NODE_WS_PINGPONG_TIMEOUT_SEC     90
 #define ESP_OPENCLAW_NODE_TASK_POLL_TICKS             pdMS_TO_TICKS(250)
 #define ESP_OPENCLAW_NODE_WORK_QUEUE_LENGTH           CONFIG_ESP_OPENCLAW_NODE_WORK_QUEUE_LENGTH
 #define ESP_OPENCLAW_NODE_TASK_STACK_SIZE             CONFIG_ESP_OPENCLAW_NODE_TASK_STACK_SIZE
