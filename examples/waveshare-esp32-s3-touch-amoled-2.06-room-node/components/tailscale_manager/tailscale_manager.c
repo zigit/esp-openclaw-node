@@ -364,6 +364,24 @@ static void ts_manager_task(void *pv)
                                  hb_stat[lo].pcTaskName,
                                  (unsigned)hb_stat[lo].usStackHighWaterMark);
                     }
+                    /* Named watch list: the guaranteed-internal stacks whose
+                     * shrink sizing needs their measured HWM (boot_ready
+                     * inventory prints before microlink spawns, so these
+                     * never appear there). */
+                    static const char *const watch[] = {
+                        "ml_coord", "ml_wg_mgr", "ml_net_io", "ml_derp_tx",
+                        "websocket", "AUD_SRC",
+                    };
+                    for (size_t w = 0; w < sizeof(watch)/sizeof(watch[0]); w++) {
+                        for (UBaseType_t i = 0; i < got; i++) {
+                            if (strncmp(hb_stat[i].pcTaskName, watch[w], 16) == 0) {
+                                ESP_LOGW(TAG, "[TS][stack hb] watch %-12s hwm=%u",
+                                         hb_stat[i].pcTaskName,
+                                         (unsigned)hb_stat[i].usStackHighWaterMark);
+                                break;
+                            }
+                        }
+                    }
                 }
 #endif
             }
