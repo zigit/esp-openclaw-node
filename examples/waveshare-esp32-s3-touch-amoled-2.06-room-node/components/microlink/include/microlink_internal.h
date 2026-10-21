@@ -45,22 +45,22 @@ extern "C" {
 
 /* Task configuration */
 #define ML_TASK_NET_IO_STACK    (8 * 1024)
-/* FIELD 2026-10-21: PRIORITY INVERSION FIX. Watchdog history: ml_wg_mgr
- * (23x) and ml_derp_tx (16x) were the starved running tasks at prio 5-7
- * while the audio/WebRTC stack ran at prio 10-18 (pc_task 18, tiT 18,
- * AUD_SRC 15, buffer_in/aenc 10). During a call the WG transport never
- * got a turn: the tunnel stopped moving packets, the TCP connection went
- * unacknowledged, lwIP aborted the PCB (ERR_ABRT = errno 113 "Software
- * caused connection abort"), the peer saw a RST (gateway logged 1006) and
- * BOTH node transports died together ~20s into every call, mid-reply.
- * The transport must outrank the audio pipeline: a starved transport
- * kills the call, a late audio frame only clips a syllable. Kept below
- * wifi (23) and esp_timer (22) so the radio and timers still win. */
-#define ML_TASK_NET_IO_PRIO     19
+/* FIELD 2026-10-21 REVERTED (d0f79eb): the "transport must outrank the
+ * audio stack" fix was WRONG in this form and made the board DEAF. The
+ * watchdog had shown ml_wg_mgr (7) and ml_derp_tx (5) starved while the
+ * audio stack ran at 10-18 — but ml_derp_tx is a POLLING task: it yields
+ * with vTaskDelay(1ms) = 1000 wakeups/s. At prio 19 on CPU0 it preempted
+ * the audio path on every wake: 'AFE: Ringbuffer of AFE is empty' +
+ * 'AUD_AEC_SRC: Fail to read from AEC ret -1' x68 and ZERO talk opens
+ * with the wake word still detected (per-boot comparison: boots with
+ * prio 5-7 opened 6-14 calls, the prio-19 boot opened 0).
+ * The real defect is the SPIN, not the priority — fixed in ml_derp.c
+ * (yield 1ms -> 10ms). Priorities restored to their original values. */
+#define ML_TASK_NET_IO_PRIO     7
 #define ML_TASK_NET_IO_CORE     0
 
 #define ML_TASK_DERP_TX_STACK   (14 * 1024)
-#define ML_TASK_DERP_TX_PRIO    19
+#define ML_TASK_DERP_TX_PRIO    5
 #define ML_TASK_DERP_TX_CORE    0
 
 	/* FIELD 2026-10-21: shrink sized from measured HWM (watch list, heartbeatalive):
@@ -76,7 +76,7 @@ extern "C" {
 	 * this 1KB plus the peer_update queue relief is what lets the lane spawn after
 	 * the operator client is primed at boot. */
 #define ML_TASK_WG_MGR_STACK    (6 * 1024)
-#define ML_TASK_WG_MGR_PRIO     19
+#define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */

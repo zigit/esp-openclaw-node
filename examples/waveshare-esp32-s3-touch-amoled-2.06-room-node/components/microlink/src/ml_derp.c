@@ -640,8 +640,15 @@ void ml_derp_tx_task(void *arg) {
             }
         }
 
-        /* Yield briefly */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Yield briefly.
+         * FIELD 2026-10-21: this task POLLS (it drains a queue and checks the
+         * DERP socket), so the yield period IS its CPU budget. At 1ms it
+         * woke 1000x/s on CPU0 — that is the CPU0 hog behind the
+         * 'task_wdt: CPU 0: ml_derp_tx' reports (16x) and behind the
+         * starving of everything else on that core. 10ms keeps the DERP
+         * relay responsive (frames are ~ms-scale, and the queue drain runs
+         * every iteration) while giving CPU0 back to the audio stack. */
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     ESP_LOGI(TAG, "DERP I/O task exiting");
