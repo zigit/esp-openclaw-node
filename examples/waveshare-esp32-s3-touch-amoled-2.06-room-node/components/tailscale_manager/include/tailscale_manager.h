@@ -68,6 +68,18 @@ microlink_t *tailscale_manager_handle(void);
  */
 void tailscale_manager_note_gateway_unreachable(void);
 
+/**
+ * @brief Install the cached gateway name -> IP answer BEFORE the lane.
+ *
+ * The room node primes its node/operator clients at boot and those start
+ * connecting within ~100ms; the tailnet manager task only runs afterwards,
+ * so the name was unresolvable for the first attempts (2026-10-21 field
+ * log: connects at 5.0s, answer installed at 5.2s). Call this before
+ * esp_openclaw_room_node_start(). Returns ESP_OK when an answer was
+ * installed.
+ */
+esp_err_t tailscale_manager_prepare_gateway(void);
+
 #ifdef __cplusplus
 }
 #endif

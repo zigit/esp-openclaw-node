@@ -221,6 +221,15 @@ static esp_err_t waveshare_audio_open(
 
 void app_main(void)
 {
+    /* FIELD 2026-10-21 (Fredrik): install the cached gateway name -> IP
+     * answer BEFORE the room node primes its node/operator clients — those
+     * start connecting within ~100ms of esp_openclaw_room_node_start(),
+     * while the tailnet lane (and the peer table it feeds) only comes up
+     * seconds later. Without this the first connects die on
+     * CANNOT_RESOLVE_HOSTNAME. */
+    esp_err_t gw_prep = tailscale_manager_prepare_gateway();
+    ESP_LOGI(TAG, "gateway resolver prepared: %s", esp_err_to_name(gw_prep));
+
     const esp_openclaw_room_node_config_t config = {
         .display_name = "Waveshare AMOLED Room Node",
         .model_identifier = "waveshare-esp32-s3-touch-amoled-2.06",

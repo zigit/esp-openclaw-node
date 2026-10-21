@@ -163,6 +163,40 @@ static void ts_dns_hook_apply(uint32_t ip)
     s_hook_ip = ip;
 }
 
+/* Parse the gateway hostname out of the configured URI ("wss://name:443" ->
+ * "name"). */
+static void ts_parse_gateway_name(void)
+{
+    const char *g = CONFIG_TS_GATEWAY_DNS_NAME;
+    const char *s = strstr(g, "://");
+    if (s) g = s + 3;
+    if (g[0] != '\0') {
+        strlcpy(s_gateway_name, g, sizeof(s_gateway_name));
+        char *slash = strchr(s_gateway_name, '/');
+        if (slash) *slash = '\0';
+    }
+}
+
+/* Load the NVS-cached gateway IP once per boot and install it in the
+ * resolver. Returns true when an answer was installed. */
+static bool ts_install_cached_gateway(void)
+{
+    if (s_cache_loaded) {
+        return s_gateway_ip != 0;
+    }
+    s_cache_loaded = true;
+    uint32_t cached = ts_nvs_load_gateway_ip();
+    if (cached == 0) {
+        return false;
+    }
+    s_gateway_ip = cached;
+    ts_dns_hook_apply(cached);
+    char ipbuf[16];
+    microlink_ip_to_str(cached, ipbuf);
+    ESP_LOGI(TAG, "[TS] gateway name %s -> %s (NVS cache)", s_gateway_name, ipbuf);
+    return true;
+}
+
 static void ts_dns_refresh_peer_table(void)
 {
     if (strlen(s_gateway_name) == 0 || !s_ml) return;
@@ -314,33 +348,13 @@ static void ts_manager_task(void *pv)
     }
     /* Gateway name for the echo-lane resolver: Kconfig, stripped of scheme +
      * port ("wss://name:443" → "name"). Falls back to empty (lane idles). */
-    {
-        const char *g = CONFIG_TS_GATEWAY_DNS_NAME;
-        const char *s = strstr(g, "://");
-        if (s) g = s + 3;
-        if (g[0] != '\0') {
-            strlcpy(s_gateway_name, g, sizeof(s_gateway_name));
-            char *slash = strchr(s_gateway_name, '/');
-            if (slash) *slash = '\0';
-        }
-    }
+    ts_parse_gateway_name();
     /* FIELD 2026-10-21 (Fredrik): install the NVS-cached answer BEFORE the
      * lane exists. The first connect attempts used to start ~10s in and
      * failed for ~15s because the name only became resolvable once the
      * peer table had the gateway (t=25s). With the cache the name resolves
      * immediately — the lane is only needed for the traffic itself. */
-    if (strlen(s_gateway_name) > 0 && !s_cache_loaded) {
-        s_cache_loaded = true;
-        uint32_t cached = ts_nvs_load_gateway_ip();
-        if (cached != 0) {
-            s_gateway_ip = cached;
-            ts_dns_hook_apply(cached);
-            char ipbuf[16];
-            microlink_ip_to_str(cached, ipbuf);
-            ESP_LOGI(TAG, "[TS] gateway name %s -> %s (NVS cache, pre-lane)",
-                     s_gateway_name, ipbuf);
-        }
-    }
+    ts_install_cached_gateway();
 
     s_ml = microlink_init(&cfg);
     if (!s_ml) {
@@ -535,6 +549,24 @@ esp_err_t tailscale_manager_start(void)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+#endif
+}
+
+esp_err_t tailscale_manager_prepare_gateway(void)
+{
+#if !CONFIG_TS_ENABLE
+    return ESP_OK;
+#else
+    /* FIELD 2026-10-21: the room node primes its node/operator clients at
+     * boot and those connect within ~100ms — the tailnet manager task only
+     * runs afterwards, so the name was unresolvable for the first attempts
+     * (field log: connects at 5.0s, answer installed at 5.2s). Call this
+     * before esp_openclaw_room_node_start(). */
+    ts_parse_gateway_name();
+    if (strlen(s_gateway_name) == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ts_install_cached_gateway() ? ESP_OK : ESP_ERR_NOT_FOUND;
 #endif
 }
 
