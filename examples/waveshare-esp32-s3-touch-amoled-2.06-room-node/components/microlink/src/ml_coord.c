@@ -1320,6 +1320,19 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
     snprintf(key_str, sizeof(key_str), "discokey:%s", key_hex);
     cJSON_AddStringToObject(root, "DiscoKey", key_str);
 
+    /* FIELD 2026-10-22: log the disco key WE announce, once, at WARN
+     * (this tag is pinned to WARN), so any 'DISCO decrypt failed:
+     * ... our_disco=...' line can be matched against what the coord map
+     * actually carries for this board. */
+    {
+        static bool disco_logged_once = false;
+        if (!disco_logged_once) {
+            disco_logged_once = true;
+            ESP_LOGW(TAG, "Announcing disco_key=%.16s... (full: %.64s)",
+                     key_hex, key_hex);
+        }
+    }
+
     /* Stream=false for initial fetch */
     cJSON_AddBoolToObject(root, "Stream", false);
     cJSON_AddBoolToObject(root, "KeepAlive", true);

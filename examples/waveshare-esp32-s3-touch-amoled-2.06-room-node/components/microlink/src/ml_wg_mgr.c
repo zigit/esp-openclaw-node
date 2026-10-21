@@ -639,6 +639,18 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     }
 
     ml_peer_t *p = &ml->peers[idx];
+    /* FIELD 2026-10-22: a session media peer mints a fresh disco key per
+     * call; log every CHANGE at WARN so a change can be correlated with
+     * 'DISCO decrypt failed' lines (same boot, timestamps). If the sender
+     * still fails after the change landed here, the coord map never
+     * delivered the fresh key to the sender's side. */
+    if (is_update && memcmp(p->disco_key, update->disco_key, 32) != 0) {
+        char oldk[17], newk[17];
+        hex32(p->disco_key, oldk, 8);
+        hex32(update->disco_key, newk, 8);
+        ESP_LOGW(TAG, "Peer %s disco key changed: %s -> %s",
+                 p->hostname, oldk, newk);
+    }
     p->vpn_ip = update->vpn_ip;
     memcpy(p->public_key, update->public_key, 32);
     memcpy(p->disco_key, update->disco_key, 32);
@@ -1318,7 +1330,17 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
     if (nacl_box_open(plaintext, ciphertext, ciphertext_len, nonce,
                       sender_disco_key, ml->disco_private_key) != 0) {
-        ESP_LOGW(TAG, "DISCO decrypt failed");
+        /* FIELD 2026-10-22: name the sender + path at WARN. tailscale_manager
+         * pins this tag to WARN, so the INFO 'DISCO RX' line never reaches
+         * the log and ~22 decrypt failures per boot were anonymous. Decrypt
+         * failure means the sender encrypted to a disco pub key that is NOT
+         * ours — a stale board disco key cached sender-side, or a corrupted
+         * packet. Sender key + our key identifies which. */
+        char sk[17], ok[17];
+        hex32(sender_disco_key, sk, 8);
+        hex32(ml->disco_public_key, ok, 8);
+        ESP_LOGW(TAG, "DISCO decrypt failed: sender_disco=%s via=%s our_disco=%s len=%d",
+                 sk, pkt->via_derp ? "DERP" : "direct", ok, (int)pkt->len);
         free(plaintext);
         return;
     }
