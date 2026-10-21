@@ -34,6 +34,20 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include "esp_heap_caps.h"
+
+/* FIELD 2026-10-21: struct wireguard_device embeds peers[16] (~20KB) — lwIP
+ * mem_calloc lands it in internal SRAM and microlink_start then drops
+ * internal free 25514 -> 2358 (measured whale), starving the TLS/operator
+ * path (operator client create NO_MEMs forever at largest 7936). Data only
+ * (never touched during flash ops — that constraint is for task stacks),
+ * so PSRAM residency is safe; internal fallback for non-PSRAM boards.
+ * MEM_LIBC_MALLOC=1: mem_free() is libc free(), dispatches across heaps. */
+static void *wg_device_calloc(size_t n, size_t size)
+{
+    void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+    return p != NULL ? p : calloc(n, size);
+}
 
 #include "lwip/netif.h"
 #include "lwip/ip.h"
@@ -1237,7 +1251,7 @@ err_t wireguardif_init(struct netif *netif) {
 			// In magicsock mode, skip creating UDP socket - packets come via inject_packet
 			if (g_disable_socket_bind) {
 				WG_DEBUG("[WG] Socket binding disabled - using magicsock mode\n");
-				device = (struct wireguard_device *)mem_calloc(1, sizeof(struct wireguard_device));
+				device = (struct wireguard_device *)wg_device_calloc(1, sizeof(struct wireguard_device));
 				if (device) {
 					device->netif = netif;
 					device->udp_pcb = NULL;  // No internal socket
@@ -1281,7 +1295,7 @@ err_t wireguardif_init(struct netif *netif) {
 				if (udp) {
 					result = udp_bind(udp, IP_ADDR_ANY, init_data->listen_port); // Note this listens on all interfaces! Really just want the passed netif
 					if (result == ERR_OK) {
-						device = (struct wireguard_device *)mem_calloc(1, sizeof(struct wireguard_device));
+						device = (struct wireguard_device *)wg_device_calloc(1, sizeof(struct wireguard_device));
 						if (device) {
 							device->netif = netif;
 							if (init_data->bind_netif) {

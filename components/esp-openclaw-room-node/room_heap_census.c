@@ -97,6 +97,15 @@ static void census_per_task(const char *stage, const char *tag)
 
 #define HEAP_CENSUS_TAG "room_heap"
 
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+/* Static inventory buffer, never allocate: the census runs at the most
+ * fragmented moments (teardown under heap pressure) — a calloc for the
+ * task array fails exactly then and silently prints nothing (three
+ * captures lost their inventory this way). Bound ~40 tasks x status. */
+#define CENSUS_MAX_TASK_STAT 40
+static TaskStatus_t s_task_stat[CENSUS_MAX_TASK_STAT];
+#endif
+
 void room_heap_census_tick(void)
 {
     const uint32_t internal8 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -156,34 +165,36 @@ void room_heap_census_log(const char *stage)
      * stack overflow under heap pressure (2026-10-21, decoded backtrace). */
     HEAP_CENSUS_REGION_DUMP();
 
-#if FREERTOS_USE_TRACE_FACILITY
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    /* Static inventory buffer, never allocate: the census runs at the most
+     * fragmented moments (teardown under heap pressure) — a calloc for the
+     * task array fails exactly then and silently prints nothing (three
+     * captures lost their inventory this way). Bound ~40 tasks. */
     UBaseType_t count = uxTaskGetNumberOfTasks();
     if (count == 0) return;
-    TaskStatus_t *tasks = calloc(count + 8, sizeof(TaskStatus_t));
-    if (tasks == NULL) return;
-    UBaseType_t n = uxTaskGetSystemState(tasks, count + 8, NULL);
+    UBaseType_t cap = count > CENSUS_MAX_TASK_STAT ? CENSUS_MAX_TASK_STAT
+                                                   : count;
+    UBaseType_t n = uxTaskGetSystemState(s_task_stat, cap, NULL);
     if (n != 0) {
         /* Ascending by stack HWM: the at-risk tasks print first. */
         for (UBaseType_t a = 1; a < n; a++) {
-            TaskStatus_t key = tasks[a];
+            TaskStatus_t key = s_task_stat[a];
             UBaseType_t b = a;
-            while (b > 0 && tasks[b - 1].usStackHighWaterMark >
+            while (b > 0 && s_task_stat[b - 1].usStackHighWaterMark >
                    key.usStackHighWaterMark) {
-                tasks[b] = tasks[b - 1];
+                s_task_stat[b] = s_task_stat[b - 1];
                 b--;
             }
-            tasks[b] = key;
+            s_task_stat[b] = key;
         }
         for (UBaseType_t i = 0; i < n; i++) {
             ESP_LOGW(HEAP_CENSUS_TAG, "[%s] task %-16s state=%d prio=%u "
-                     "stack_hwm=%u cpu=%d",
-                     stage, tasks[i].pcTaskName,
-                     (int)tasks[i].eCurrentState,
-                     (unsigned)tasks[i].uxCurrentPriority,
-                     (unsigned)tasks[i].usStackHighWaterMark,
-                     (int)tasks[i].xCoreID);
+                     "stack_hwm=%u",
+                     stage, s_task_stat[i].pcTaskName,
+                     (int)s_task_stat[i].eCurrentState,
+                     (unsigned)s_task_stat[i].uxCurrentPriority,
+                     (unsigned)s_task_stat[i].usStackHighWaterMark);
         }
     }
-    free(tasks);
 #endif /* CONFIG_FREERTOS_USE_TRACE_FACILITY */
 }
