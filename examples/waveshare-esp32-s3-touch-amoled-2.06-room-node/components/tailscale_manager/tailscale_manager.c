@@ -79,6 +79,8 @@ static volatile bool s_gateway_resolved = false;
 #define TS_NVS_NS "ts_mgr"
 #define TS_NVS_KEY_GW_IP "gw_ip"
 static uint32_t s_gateway_ip = 0;
+static uint32_t s_hook_ip = 0;      /* what the DNS hook currently holds */
+static bool s_cache_loaded = false;  /* NVS cache read done */
 static bool s_gateway_stale = false;   /* cached answer known-bad */
 static bool s_wait_logged = false;
 
@@ -149,6 +151,18 @@ static void ts_start_echo_socket(microlink_t *ml)
  * hook has the name; also re-checks if the peer table changes. */
 static microlink_t *s_ml = NULL;
 
+/* Apply the answer to the lwIP resolver. Always re-applies when the hook
+ * does not already carry this IP — the invalidation path empties the hook,
+ * and a same-IP answer must still be re-installed (regression 13:28). */
+static void ts_dns_hook_apply(uint32_t ip)
+{
+    if (ip == 0 || ip == s_hook_ip) {
+        return;
+    }
+    room_dns_hook_set(s_gateway_name, ip);
+    s_hook_ip = ip;
+}
+
 static void ts_dns_refresh_peer_table(void)
 {
     if (strlen(s_gateway_name) == 0 || !s_ml) return;
@@ -159,8 +173,6 @@ static void ts_dns_refresh_peer_table(void)
         if (ip != s_gateway_ip) {
             bool changed = s_gateway_ip != 0;
             s_gateway_ip = ip;
-            s_gateway_stale = false;
-            room_dns_hook_set(s_gateway_name, ip);
             ts_nvs_store_gateway_ip(ip);
             char ipbuf[16];
             microlink_ip_to_str(ip, ipbuf);
@@ -168,26 +180,44 @@ static void ts_dns_refresh_peer_table(void)
                      s_gateway_name, ipbuf,
                      changed ? "updated" : "resolved via peer table");
         }
+        s_gateway_stale = false;
         s_gateway_resolved = true;
+        ts_dns_hook_apply(ip);
         return;
     }
 
     /* 2) NVS cache: the fast path — the answer survives reboots and does
-     * not depend on the peer table (which may be full or not yet mapped). */
-    if (!s_gateway_resolved && !s_gateway_stale) {
+     * not depend on the peer table (which may be full or not yet mapped).
+     * Read once per boot; the cache is refreshed whenever the peer table
+     * yields a different IP. */
+    if (!s_cache_loaded) {
+        s_cache_loaded = true;
         uint32_t cached = ts_nvs_load_gateway_ip();
         if (cached != 0) {
             s_gateway_ip = cached;
-            s_gateway_resolved = true;
-            room_dns_hook_set(s_gateway_name, cached);
             char ipbuf[16];
             microlink_ip_to_str(cached, ipbuf);
             ESP_LOGI(TAG, "[TS] gateway name %s -> %s (NVS cache)",
                      s_gateway_name, ipbuf);
-            return;
         }
     }
-    if (!s_gateway_resolved && !s_wait_logged) {
+
+    /* 3) Last known answer still resolves the name: a possibly-stale IP
+     * beats "name does not resolve" (which fails every connect instantly).
+     * The peer table refresh above replaces it when the gateway moves. */
+    if (s_gateway_ip != 0) {
+        if (s_gateway_stale) {
+            char ipbuf[16];
+            microlink_ip_to_str(s_gateway_ip, ipbuf);
+            ESP_LOGW(TAG, "[TS] gateway name %s -> %s (last known; peer "
+                     "table has not confirmed it yet)", s_gateway_name, ipbuf);
+            s_gateway_stale = false;
+        }
+        s_gateway_resolved = true;
+        ts_dns_hook_apply(s_gateway_ip);
+        return;
+    }
+    if (!s_wait_logged) {
         ESP_LOGI(TAG, "[TS] gateway name %s not in peer table yet "
                  "(cache or map pending)", s_gateway_name);
         s_wait_logged = true;
@@ -199,13 +229,13 @@ void tailscale_manager_note_gateway_unreachable(void)
     if (strlen(s_gateway_name) == 0) {
         return;
     }
-    /* Drop the answer: lwIP stops resolving the name to the dead IP, and
-     * the next resolve re-reads the peer table (a changed gateway IP is
-     * then adopted). The NVS copy stays as last-known but is not re-used
-     * until a fresh answer arrives. */
-    room_dns_hook_set(s_gateway_name, 0);
-    s_gateway_resolved = false;
+    /* Mark the answer suspect so the next tick re-resolves. The answer
+     * itself is KEPT (hook entry + cached IP): clearing it turns a
+     * possibly-stale address into "name does not resolve at all", which
+     * fails every connect instantly and — with the NVS fallback gated on
+     * staleness — could never recover (regression 13:28). */
     s_gateway_stale = true;
+    s_gateway_resolved = false;
     s_wait_logged = false;
     ESP_LOGW(TAG, "[TS] gateway %s marked unreachable — re-resolving",
              s_gateway_name);
@@ -292,6 +322,23 @@ static void ts_manager_task(void *pv)
             strlcpy(s_gateway_name, g, sizeof(s_gateway_name));
             char *slash = strchr(s_gateway_name, '/');
             if (slash) *slash = '\0';
+        }
+    }
+    /* FIELD 2026-10-21 (Fredrik): install the NVS-cached answer BEFORE the
+     * lane exists. The first connect attempts used to start ~10s in and
+     * failed for ~15s because the name only became resolvable once the
+     * peer table had the gateway (t=25s). With the cache the name resolves
+     * immediately — the lane is only needed for the traffic itself. */
+    if (strlen(s_gateway_name) > 0 && !s_cache_loaded) {
+        s_cache_loaded = true;
+        uint32_t cached = ts_nvs_load_gateway_ip();
+        if (cached != 0) {
+            s_gateway_ip = cached;
+            ts_dns_hook_apply(cached);
+            char ipbuf[16];
+            microlink_ip_to_str(cached, ipbuf);
+            ESP_LOGI(TAG, "[TS] gateway name %s -> %s (NVS cache, pre-lane)",
+                     s_gateway_name, ipbuf);
         }
     }
 
