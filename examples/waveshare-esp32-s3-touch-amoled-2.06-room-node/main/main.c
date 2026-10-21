@@ -254,6 +254,15 @@ void app_main(void)
             .playback_gain_db = 6.0f,
             .configure_input_gain = true,
             .input_gain_db = 30.0f,
+            /* FIELD 2026-10-21 (Fredrik): the ES7210 is a 2-mic ADC — the 'R'
+             * channel is MIC3, NOT a loopback of the speaker. So there is no
+             * real AEC reference: the speaker's own voice reached the
+             * uplink, the gateway interrupted itself, and the voice session
+             * was torn down mid-reply (dual ws abort ~20s after every call
+             * opened — errno 113 'Software caused connection abort' = the
+             * peer's RST, not a network fault). Force half-duplex: the mic
+             * is muted while the speaker plays (+300 ms tail). */
+            .force_half_duplex_capture = true,
         },
     };
     ESP_ERROR_CHECK(esp_openclaw_room_node_start(&config));

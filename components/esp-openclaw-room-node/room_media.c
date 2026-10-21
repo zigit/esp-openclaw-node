@@ -366,9 +366,13 @@ esp_err_t room_media_init(room_wake_callback_t callback, void *ctx)
         board->audio.playback_volume,
         board->audio.playback_gain_db);
 
-    room_audio_gate_init(&playback_gate, board->audio.afe_layout);
+    room_audio_gate_init_ex(&playback_gate, board->audio.afe_layout,
+                            board->audio.force_half_duplex_capture);
     if (playback_gate.enabled) {
-        ESP_LOGI(TAG, "no speaker reference: half-duplex capture with 300 ms playback tail");
+        ESP_LOGI(TAG, "half-duplex capture armed: mic muted during playback "
+                 "(+300 ms tail)%s",
+                 board->audio.force_half_duplex_capture
+                     ? " [forced: no real speaker reference]" : "");
     }
     room_capture_audio_aec_src_cfg_t source_cfg = {
         .mic_layout = board->audio.afe_layout,

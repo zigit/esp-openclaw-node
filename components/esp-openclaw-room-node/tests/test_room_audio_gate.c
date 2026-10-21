@@ -78,11 +78,35 @@ static void test_reference_capture(void)
     capture_block(NULL, 20000, false);
 }
 
+/* FIELD 2026-10-21 (Fredrik): a board whose 'R' channel is NOT a real
+ * speaker reference must still get the half-duplex gate — otherwise the
+ * speaker's own voice reaches the uplink and the gateway interrupts
+ * itself. */
+static void test_forced_half_duplex(void)
+{
+    const char *layouts[] = {"MR", "MMNR", "M", NULL};
+    for (size_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
+        room_audio_gate_t gate;
+        room_audio_gate_init_ex(&gate, layouts[i], true);
+        const int16_t speaker[] = {32767, -32768};
+        assert(room_audio_gate_begin_playback(&gate, speaker, 2));
+        capture_block(&gate, 20000, true);   /* muted while playing */
+        room_audio_gate_end_playback(&gate);
+        capture_block(&gate, 20000, true);   /* still inside the tail */
+        capture_block(&gate, 20000, false);  /* tail expired -> audible */
+    }
+    /* Forced mode must not mute when nothing is playing. */
+    room_audio_gate_t gate;
+    room_audio_gate_init_ex(&gate, "MR", true);
+    capture_block(&gate, 20000, false);
+}
+
 int main(void)
 {
     test_single_mic_turns();
     test_silent_playback();
     test_reference_capture();
+    test_forced_half_duplex();
     puts("room audio gate tests passed");
     return 0;
 }
