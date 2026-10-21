@@ -92,6 +92,9 @@ typedef struct {
     uint8_t                     in_error     : 1;
     uint8_t                     stopping     : 1;
     bool                        wait_feeding : 1;
+    /* FIELD 2026-10-21: feed backoff until (ms); 0 = no backoff. Stops the
+     * AFE 'ringbuffer full' WARN flood when nothing drains the AFE. */
+    uint64_t                    feed_backoff_until_ms;
     const esp_afe_sr_iface_t   *afe_handle;
     esp_afe_sr_data_t          *afe_data;
     /* Dual-resident AFE (2026-10-21 fix): both pipeline flavors are built
@@ -349,7 +352,27 @@ static inline void audio_aec_fill_vad_working_buf(audio_aec_src_t *src, uint8_t 
 
 static int audio_aec_feed_data(audio_aec_src_t *src, uint8_t *feed_data, int feed_size)
 {
+    /* FIELD 2026-10-21: the AFE library prints 'Ringbuffer of AFE(FEED) is
+     * full' from inside feed() when its input ring overflows — a per-block
+     * WARN that hammers the serial line (Fredrik, 20:21) and burns CPU on
+     * the exact core that must serve the call. The ring fills when nothing
+     * drains the AFE (during a call the wake sink is DISABLEd, so only the
+     * talk path fetches). Stop feeding a full ring: the data would be
+     * overwritten anyway, and the wake path is dead until the call ends.
+     * Short backoff so the drain can catch up, then resume. */
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (src->feed_backoff_until_ms > 0) {
+        if (now_ms < src->feed_backoff_until_ms) {
+            return 0;  /* skipped this block; the AFE keeps its old content */
+        }
+        src->feed_backoff_until_ms = 0;
+    }
     int ret = src->afe_handle->feed(src->afe_data, (int16_t *)feed_data);
+    if (ret < 0) {
+        /* Back off briefly: the ring is full, so more feeds only produce more
+         * 'ringbuffer full' warnings from the library. */
+        src->feed_backoff_until_ms = now_ms + 200;
+    }
     room_diagnostics_audio_record_feed(ret >= 0);
     return ret;
 }

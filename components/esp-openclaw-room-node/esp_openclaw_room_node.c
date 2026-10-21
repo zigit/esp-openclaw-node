@@ -613,7 +613,23 @@ static void start_talk_once(void)
     xSemaphoreGive(state_lock);
     if (cancelled) goto done;
 
-    esp_peer_default_cfg_t peer = {.agent_recv_timeout = 500, .ice_use_lite_mode = true};
+    /* FIELD 2026-10-21: the MEDIA peer has its own keepalive — STUN binding
+     * requests every 6s, and after alive_binding_retries unanswered attempts
+     * the peer is declared disconnected (default 5 => 30s). Field log:
+     *   'Peer keepalive check fail count 2/3/4' then
+     *   'Peer not response for binding after 30000' -> 'Peer disconnected'
+     * at ~30s into EVERY call — the media peer, not the control socket, was
+     * the killer (the control socket now survives past it). The binding
+     * requests ride the same WG tunnel whose STUN failures correlate with
+     * every abort (6/6 aborting boots, 0/6 healthy), so a 30s tolerance is
+     * too tight for that path. 15 attempts = 90s, matching the control
+     * socket's keepalive floor so both watchdogs act on the same timescale.
+     * 0xFF would disable the check entirely — keep it, just tolerant. */
+    esp_peer_default_cfg_t peer = {
+        .agent_recv_timeout = 500,
+        .ice_use_lite_mode = true,
+        .alive_binding_retries = 15,
+    };
     esp_webrtc_cfg_t config = {
         .peer_cfg = {
             .audio_info = {.codec = ESP_PEER_AUDIO_CODEC_OPUS, .sample_rate = 16000, .channel = 1},
