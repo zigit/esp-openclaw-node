@@ -526,6 +526,22 @@ static bool admit_talk_locked(void)
 {
     if (!operator_ready || operator_client == NULL || gateway_http_base == NULL ||
         camera_active || talk_call != NULL || talk_generation == UINT32_MAX) return false;
+#if CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK > 0
+    /* Death-certificate guard (2026-10-21 11:31): the talk-mode audio
+     * pipeline reopen carves ~14KB internal AFTER transports are
+     * established; below this floor a call goes zombie or aborts both
+     * transports ~19s in. Refuse early: clean error face, no zombie. */
+    size_t largest = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (largest < CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK) {
+        ESP_LOGW(TAG, "talk refused: internal largest=%u < floor=%d "
+                 "(fragmented heap; reboot the board to restore)",
+                 (unsigned)largest,
+                 CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK);
+        room_heap_census_log("talk_refused_guard");
+        return false;
+    }
+#endif
     uint32_t generation = talk_generation + 1;
     esp_openclaw_talk_signaling_config_t signaling = {
         .operator_node = operator_client,

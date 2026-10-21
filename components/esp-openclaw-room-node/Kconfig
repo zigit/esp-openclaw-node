@@ -57,4 +57,16 @@ config OPENCLAW_ROOM_CALL_IDLE_SECONDS
     range 15 1800
     default 180
 
+config OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK
+    int "Refuse call when internal largest block below (bytes); 0 disables"
+    range 0 16384
+    default 3584
+    help
+        Death-certificate guard (2026-10-21): the talk-mode audio pipeline
+        reopen carves ~14KB internal AFTER transports are established; when
+        the largest internal block at admission is below the carve size, a
+        call either goes zombie (pipeline open fails) or aborts both
+        transports ~19s in (ECONNABORTED). Refusing early gives a clean
+        error face instead. 3584 = measured zombie threshold; 0 disables.
+
 endmenu

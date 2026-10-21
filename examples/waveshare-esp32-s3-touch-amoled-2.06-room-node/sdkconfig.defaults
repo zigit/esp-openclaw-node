@@ -82,6 +82,9 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # from vTaskSwitchContext) hit right after census teardown_end — the 2048-word default has
 # no headroom under heap pressure. 4096 words kills the crash class.
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# Death-certificate guard (11:31 tick capture): pipeline reopen carves ~14KB internal
+# after transports are established; refuse admission below the zombie floor (3584).
+CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK=3584
 
 # --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
 CONFIG_TS_ENABLE=y
