@@ -206,6 +206,10 @@ static void start_talk_once(void);
 static bool admit_talk_locked(void);
 static esp_err_t register_talk_node_commands(esp_openclaw_node_handle_t node);
 static TaskHandle_t talk_start_worker;
+/* In-call heap decay monitor (diagnostic 2026-10-21): 5s census one-liner via
+ * esp_timer — no new task. Callback does heap reads only, timer-safe. */
+static esp_timer_handle_t talk_heap_timer;
+static void talk_heap_tick_cb(void *arg) { (void)arg; room_heap_census_tick(); }
 /* Timer and queued operator work are guarded by state_lock. The existing
  * internal-stack supervisor also performs NVS-backed operator startup. */
 static esp_timer_handle_t operator_start_timer;
@@ -461,6 +465,9 @@ static void talk_teardown_task(void *arg)
         xSemaphoreGive(state_lock);
         esp_openclaw_talk_call_release(call);
         room_heap_census_log("teardown_end");
+        if (talk_heap_timer != NULL) {
+            esp_timer_stop(talk_heap_timer);
+        }
         refresh_home_facts();
         start_node_if_pending();
         start_operator_if_pending();
@@ -562,11 +569,28 @@ static void start_talk_once(void)
     xSemaphoreGive(state_lock);
     if (!admitted) return;
     talk_stage(generation, "startup", "begin", 0);
+    room_heap_census_log("talk_open_begin");
+    /* In-call decay monitor: 5s one-liner without a new task (esp_timer;
+     * callback does heap reads only). Stopped at teardown_end. */
+    if (talk_heap_timer == NULL) {
+        const esp_timer_create_args_t tick_args = {
+            .callback = talk_heap_tick_cb,
+            .name = "talk_heap_tick",
+        };
+        if (esp_timer_create(&tick_args, &talk_heap_timer) != ESP_OK) {
+            talk_heap_timer = NULL;
+        }
+    }
+    if (talk_heap_timer != NULL) {
+        esp_timer_stop(talk_heap_timer);  /* no-op safe if not running */
+        esp_timer_start_periodic(talk_heap_timer, 5000000);
+    }
     if (cancelled) goto done;
     talk_stage(generation, "media_acquire", "begin", 0);
     room_media_begin_talk();
     talk_stage(generation, "media_acquire", "end", 0);
     talk_audio_snapshot(generation, "acquired");
+    room_heap_census_log("talk_media_acquired");
     xSemaphoreTake(state_lock, portMAX_DELAY);
     talk_media_owned = true;
     cancelled = talk_cancel_requested;

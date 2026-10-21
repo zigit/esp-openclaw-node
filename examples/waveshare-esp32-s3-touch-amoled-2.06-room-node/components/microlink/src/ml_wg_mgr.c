@@ -73,7 +73,12 @@ typedef struct {
     bool active;
 } disco_probe_t;
 
-#define MAX_PENDING_PROBES 32
+/* Field 2026-10-21: during reconnect storms pings fire to many peers while
+ * pongs go unmatched; entries were only cleared on a matched pong, so the
+ * table filled and stayed full ('ping will be unmatched' spam, probe
+ * discovery dead until reboot). Doubled capacity AND added stale sweep. */
+#define MAX_PENDING_PROBES 64
+#define DISCO_PROBE_STALE_MS 15000u
 static disco_probe_t pending_probes[MAX_PENDING_PROBES];
 
 /* ============================================================================
@@ -826,6 +831,28 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
             ESP_LOGI(TAG, "Probe registered slot=%d peer=%s txid=%02x%02x%02x%02x",
                      i, p->hostname, txid[0], txid[1], txid[2], txid[3]);
             break;
+        }
+    }
+    if (!registered) {
+        /* No free slot: reclaim stale entries first (pong lost / peer gone).
+         * sent_ms lives for exactly this purpose. */
+        uint64_t now_ms = ml_get_time_ms();
+        for (int i = 0; i < MAX_PENDING_PROBES && !registered; i++) {
+            if (pending_probes[i].active &&
+                now_ms - pending_probes[i].sent_ms > DISCO_PROBE_STALE_MS) {
+                pending_probes[i].active = false;
+            }
+        }
+        for (int i = 0; i < MAX_PENDING_PROBES && !registered; i++) {
+            if (!pending_probes[i].active) {
+                memcpy(pending_probes[i].txid, txid, DISCO_TXID_LEN);
+                pending_probes[i].peer_index = peer_idx;
+                pending_probes[i].sent_ms = now_ms;
+                pending_probes[i].active = true;
+                registered = true;
+                ESP_LOGI(TAG, "Probe registered (reclaimed) slot=%d peer=%s",
+                         i, p->hostname);
+            }
         }
     }
     if (!registered) {

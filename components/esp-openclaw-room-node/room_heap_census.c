@@ -97,6 +97,21 @@ static void census_per_task(const char *stage, const char *tag)
 
 #define HEAP_CENSUS_TAG "room_heap"
 
+void room_heap_census_tick(void)
+{
+    const uint32_t internal8 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    size_t i8_free = heap_caps_get_free_size(internal8);
+    size_t i8_largest = heap_caps_get_largest_free_block(internal8);
+    multi_heap_info_t info = {0};
+    heap_caps_get_info(&info, internal8);
+    /* One line only: safe from esp_timer context, cheap (heap reads),
+     * designed to be diffed across the call's decay curve. */
+    ESP_LOGW(HEAP_CENSUS_TAG, "[tick] free=%u largest=%u alloc=%u freeblocks=%u",
+             (unsigned)i8_free, (unsigned)i8_largest,
+             (unsigned)info.allocated_blocks,
+             (unsigned)info.free_blocks);
+}
+
 #if CONFIG_OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP
 #define HEAP_CENSUS_REGION_DUMP() heap_caps_print_heap_info(internal8)
 #else

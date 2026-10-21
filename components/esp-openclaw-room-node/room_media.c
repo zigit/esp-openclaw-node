@@ -482,7 +482,7 @@ esp_err_t room_media_set_ambient_wake(bool enabled)
      * enabling the ambient sink reopens the source with WakeNet restored.
      */
     room_diagnostics_audio_set_capture_owner(ROOM_DIAGNOSTICS_CAPTURE_TRANSITION);
-    room_heap_census_log(enabled ? "afe_detach_begin" : "afe_reattach_begin");
+    room_heap_census_log(enabled ? "afe_reattach_begin" : "afe_detach_begin");
     esp_capture_err_t source_err =
         room_capture_audio_aec_src_set_wakenet_enabled(audio_source, enabled);
     if (source_err != ESP_CAPTURE_ERR_OK) {

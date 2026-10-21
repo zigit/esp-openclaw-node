@@ -11,3 +11,7 @@
  * stack high-water inventory. Diagnostic; call at talk lifecycle stages
  * and diff the output. */
 void room_heap_census_log(const char *stage);
+
+/* Lightweight one-liner for timers: internal8 free/largest + block counts
+ * in a single ESP_LOGW. Safe from esp_timer callbacks (heap reads only). */
+void room_heap_census_tick(void);
