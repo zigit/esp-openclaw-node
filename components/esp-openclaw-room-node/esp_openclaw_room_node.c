@@ -111,6 +111,13 @@ static void talk_audio_snapshot(uint32_t generation, const char *stage)
         audio.renderer_accepted, audio.renderer_errors);
 }
 
+/* FIELD 2026-10-22: in-call snapshot tick. Runs in the esp_timer task:
+ * only reads atomic counters + ESP_LOGI, no locks taken here. */
+static void talk_snap_tick(void *arg)
+{
+    talk_audio_snapshot((uint32_t)(uintptr_t)arg, "tick");
+}
+
 static void refresh_home_facts(void)
 {
     xSemaphoreTake(state_lock, portMAX_DELAY);
@@ -517,6 +524,32 @@ static int webrtc_event(esp_webrtc_event_t *event, void *ctx)
         talk_stage(generation, stage, current ? "current" : "stale",
             (int)event->type);
         if (current) talk_audio_snapshot(generation, stage);
+    }
+    /* FIELD 2026-10-22: periodic audio snapshot DURING the call, every 5s.
+     * The 00:51 call proved why: the only in-call counters were at
+     * peer_connected (t=69s, render_ok=0) and teardown (t=137s,
+     * render_ok=1814) — two points from which we could only COMPUTE the cut
+     * moment (69.2 + 1814/50 = 105.5s, matching the DERP RST at 105.977s
+     * within 500ms). With 5s snapshots the cut second is directly visible,
+     * and whether capture kept flowing while render stopped tells us which
+     * direction died first. */
+    {
+        static esp_timer_handle_t snap_timer = NULL;
+        if (current && stage && strcmp(stage, "peer_connected") == 0) {
+            if (snap_timer == NULL) {
+                const esp_timer_create_args_t args = {
+                    .callback = talk_snap_tick,
+                    .arg = (void *)(uintptr_t)generation,
+                    .name = "talk_snap",
+                };
+                esp_timer_create(&args, &snap_timer);
+            }
+            esp_timer_stop(snap_timer); /* restart cleanly on re-connect */
+            esp_timer_start_periodic(snap_timer, 5000000);
+        } else if (stage && (strcmp(stage, "peer_disconnected") == 0 ||
+                             strcmp(stage, "peer_failed") == 0)) {
+            if (snap_timer) esp_timer_stop(snap_timer);
+        }
     }
     return 0;
 }
