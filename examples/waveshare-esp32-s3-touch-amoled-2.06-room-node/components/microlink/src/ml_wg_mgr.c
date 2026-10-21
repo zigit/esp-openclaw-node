@@ -525,7 +525,26 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
 
     /* Check if peer already exists */
     int idx = find_peer_by_key(ml, update->public_key);
-    if (idx >= 0) {
+    /* FIELD 2026-10-21: an UPDATE for a peer we already hold must NOT tear
+     * down its live state. The old code unconditionally reset
+     * wg_peer_index = -1 and has_direct_path = false, which:
+     *   (a) ORPHANED the peer's entry in the wireguard device (still valid
+     *       there, so peer_lookup_by_allowed_ip can hand traffic to the
+     *       STALE entry -> 'keypair unusable (valid=0 initiator=0
+     *       last_rx=0)' -> the peer's packets never leave the board);
+     *   (b) WIPED the discovered direct endpoint -> the gateway's traffic
+     *       fell back to DERP ('ep=0.0.0.0:0 lane=DERP'), so a DERP reset
+     *       took the media peer down with it ('Peer not response for
+     *       binding after 30000').
+     * The coord map re-delivers peers continuously, so this ran on every
+     * update. Now: keep the WG slot and the direct path; only apply the
+     * update's own endpoints when it actually provides some. */
+    bool is_update = (idx >= 0);
+    int prev_wg_peer_index = is_update ? ml->peers[idx].wg_peer_index : -1;
+    bool prev_has_direct = is_update ? ml->peers[idx].has_direct_path : false;
+    uint32_t prev_best_ip = is_update ? ml->peers[idx].best_ip : 0;
+    uint16_t prev_best_port = is_update ? ml->peers[idx].best_port : 0;
+    if (is_update) {
         ESP_LOGI(TAG, "Updating existing peer %s (idx=%d)", update->hostname, idx);
     } else {
         /* Find free slot. FIELD 2026-10-21 (Fredrik): the room node only
@@ -626,11 +645,18 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->active = true;
 
     /* Copy endpoints */
-    p->endpoint_count = update->endpoint_count;
-    for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
-        p->endpoints[i].ip = update->endpoints[i].ip;
-        p->endpoints[i].port = update->endpoints[i].port;
-        p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
+    if (is_update && update->endpoint_count == 0) {
+        /* FIELD 2026-10-21: an update without endpoints (the coord map
+         * usually has none for a peer behind NAT) must not ERASE the
+         * endpoints we already discovered — losing them pushes the peer's
+         * traffic onto the DERP relay. */
+    } else {
+        p->endpoint_count = update->endpoint_count;
+        for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
+            p->endpoints[i].ip = update->endpoints[i].ip;
+            p->endpoints[i].port = update->endpoints[i].port;
+            p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
+        }
     }
 
     /* Initialize DISCO rate limiting state */
@@ -639,10 +665,20 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->trust_until_ms = 0;
     p->last_send_ms = 0;
     p->last_upgrade_ms = 0;
-    p->has_direct_path = false;
-    p->best_ip = 0;
-    p->best_port = 0;
-    p->wg_peer_index = -1;
+    if (is_update) {
+        /* Preserve the live path state (see the note at the identity
+         * lookup): the WG slot and the direct endpoint must survive a map
+         * update, or the peer's traffic is orphaned / pushed onto DERP. */
+        p->wg_peer_index = prev_wg_peer_index;
+        p->has_direct_path = prev_has_direct;
+        p->best_ip = prev_best_ip;
+        p->best_port = prev_best_port;
+    } else {
+        p->has_direct_path = false;
+        p->best_ip = 0;
+        p->best_port = 0;
+        p->wg_peer_index = -1;
+    }
 
     char ip_str[16];
     microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -660,7 +696,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              (memcmp(p->disco_key, zero32, 32) == 0) ? 1 : 0);
 
     /* Add to wireguard-lwip */
-    if (ml->wg_netif) {
+    if (ml->wg_netif && !is_update) {
         struct netif *netif = (struct netif *)ml->wg_netif;
 
         /* Convert peer public key to base64 */
@@ -731,6 +767,22 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
             ESP_LOGW(TAG, "wireguardif_add_peer failed: %d", wg_err);
             p->wg_peer_index = -1;
         }
+    }
+
+    /* FIELD 2026-10-21: for an UPDATE the peer is already wired into
+     * wireguard-lwip (its slot was preserved above) — re-adding it would
+     * create a SECOND entry for the same public key, and
+     * peer_lookup_by_allowed_ip scans in order, so traffic could be handed
+     * to the stale one. Only apply endpoints if the update provides them
+     * (the coord map often has none for a peer behind NAT). */
+    if (is_update && ml->wg_netif && p->wg_peer_index >= 0 &&
+        update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+        struct netif *netif = (struct netif *)ml->wg_netif;
+        ip_addr_t ep_ip;
+        IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(update->endpoints[0].ip));
+        wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+                                     &ep_ip, update->endpoints[0].port);
     }
 
     /* Persist to NVS for fast boot next time */
