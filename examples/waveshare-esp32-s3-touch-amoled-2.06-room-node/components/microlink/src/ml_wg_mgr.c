@@ -513,9 +513,16 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     if (idx >= 0) {
         ESP_LOGI(TAG, "Updating existing peer %s (idx=%d)", update->hostname, idx);
     } else {
-        /* Find free slot */
+        /* Find free slot. FIELD 2026-10-21 (Fredrik): the room node only
+         * talks to the gateway, so the working set is small — honour
+         * config.max_peers (was ignored: the scan always walked the full
+         * ML_MAX_PEERS array, letting the whole tailnet fill the table and
+         * saturate it: 'Peer table full (16 slots)'). The priority peer
+         * (the gateway) is still pinned and survives churn. */
+        int slots = ml->config.max_peers > 0 ? ml->config.max_peers : ML_MAX_PEERS;
+        if (slots > ML_MAX_PEERS) slots = ML_MAX_PEERS;
         idx = -1;
-        for (int i = 0; i < ML_MAX_PEERS; i++) {
+        for (int i = 0; i < slots; i++) {
             if (!ml->peers[i].active) {
                 idx = i;
                 break;
@@ -527,7 +534,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
             update->vpn_ip == ml->config.priority_peer_ip) {
             uint64_t oldest_ms = UINT64_MAX;
             int evict_idx = -1;
-            for (int i = 0; i < ML_MAX_PEERS; i++) {
+            for (int i = 0; i < slots; i++) {
                 if (!ml->peers[i].active) continue;
                 if (ml->peers[i].vpn_ip == ml->config.priority_peer_ip) continue;
                 uint64_t last_activity = ml->peers[i].last_send_ms;
@@ -553,8 +560,40 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         }
 
         if (idx < 0) {
+            /* Not the priority peer and the small table is full: evict the
+             * LRU non-priority peer (we only need the gateway). */
+            uint64_t oldest_ms = UINT64_MAX;
+            int evict_idx = -1;
+            for (int i = 0; i < slots; i++) {
+                if (!ml->peers[i].active) continue;
+                if (ml->config.priority_peer_ip != 0 &&
+                    ml->peers[i].vpn_ip == ml->config.priority_peer_ip) continue;
+                uint64_t last_activity = ml->peers[i].last_send_ms;
+                if (ml->peers[i].last_pong_recv_ms > last_activity) {
+                    last_activity = ml->peers[i].last_pong_recv_ms;
+                }
+                if (last_activity < oldest_ms) {
+                    oldest_ms = last_activity;
+                    evict_idx = i;
+                }
+            }
+            if (evict_idx >= 0) {
+                char evict_ip[16];
+                microlink_ip_to_str(ml->peers[evict_idx].vpn_ip, evict_ip);
+                ESP_LOGW(TAG, "Evicting LRU peer %s (%s) — table cap %d",
+                         ml->peers[evict_idx].hostname, evict_ip, slots);
+                if (ml->peers[evict_idx].wg_peer_index >= 0 && ml->wg_netif) {
+                    wireguardif_remove_peer((struct netif *)ml->wg_netif,
+                                            ml->peers[evict_idx].wg_peer_index);
+                }
+                ml->peers[evict_idx].active = false;
+                idx = evict_idx;
+            }
+        }
+
+        if (idx < 0) {
             ESP_LOGW(TAG, "Peer table full (%d slots), cannot add %s",
-                     ML_MAX_PEERS, update->hostname);
+                     slots, update->hostname);
             return -1;
         }
         if (idx >= ml->peer_count) {

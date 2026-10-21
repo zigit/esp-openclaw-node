@@ -69,6 +69,43 @@ static void ts_quiet_logs(void)
 #define TS_GATEWAY_NAME_MAX 96  /* gateway hostname length bound */
 static char s_gateway_name[96];
 static volatile bool s_gateway_resolved = false;
+/* FIELD 2026-10-21 (Fredrik): the gateway name -> IP answer is CACHED IN NVS.
+ * The peer table (the previous source) fills with the whole tailnet and
+ * saturates ('Peer table full (16 slots)'), and its answer was latched
+ * forever — a changed gateway IP was never picked up. Now: NVS cache is
+ * the fast path (works before the coord map lands), the peer table is
+ * the refresh source, and a connect failure invalidates the answer so
+ * the next resolve re-reads the table. */
+#define TS_NVS_NS "ts_mgr"
+#define TS_NVS_KEY_GW_IP "gw_ip"
+static uint32_t s_gateway_ip = 0;
+static bool s_gateway_stale = false;   /* cached answer known-bad */
+static bool s_wait_logged = false;
+
+static uint32_t ts_nvs_load_gateway_ip(void)
+{
+    nvs_handle_t handle;
+    uint32_t ip = 0;
+    if (nvs_open(TS_NVS_NS, NVS_READONLY, &handle) != ESP_OK) {
+        return 0;
+    }
+    if (nvs_get_u32(handle, TS_NVS_KEY_GW_IP, &ip) != ESP_OK) {
+        ip = 0;
+    }
+    nvs_close(handle);
+    return ip;
+}
+
+static void ts_nvs_store_gateway_ip(uint32_t ip)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TS_NVS_NS, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    nvs_set_u32(handle, TS_NVS_KEY_GW_IP, ip);
+    nvs_commit(handle);
+    nvs_close(handle);
+}
 
 /* Echo socket on the canonical spike port: keeps the gateway-side monitor
  * alive against voice fw — same UDP lane the spike app used, so the
@@ -114,18 +151,64 @@ static microlink_t *s_ml = NULL;
 
 static void ts_dns_refresh_peer_table(void)
 {
-    if (s_gateway_resolved || strlen(s_gateway_name) == 0 || !s_ml) return;
+    if (strlen(s_gateway_name) == 0 || !s_ml) return;
+
+    /* 1) Peer table: authoritative, and the refresh source. */
     uint32_t ip = microlink_resolve(s_ml, s_gateway_name);
-    if (ip == 0) {
-        ESP_LOGI(TAG, "[TS] gateway name %s not in peer table yet (cache or map pending)",
-                 s_gateway_name);
+    if (ip != 0) {
+        if (ip != s_gateway_ip) {
+            bool changed = s_gateway_ip != 0;
+            s_gateway_ip = ip;
+            s_gateway_stale = false;
+            room_dns_hook_set(s_gateway_name, ip);
+            ts_nvs_store_gateway_ip(ip);
+            char ipbuf[16];
+            microlink_ip_to_str(ip, ipbuf);
+            ESP_LOGI(TAG, "[TS] gateway name %s -> %s (%s)",
+                     s_gateway_name, ipbuf,
+                     changed ? "updated" : "resolved via peer table");
+        }
+        s_gateway_resolved = true;
         return;
     }
-    room_dns_hook_set(s_gateway_name, ip);
-    s_gateway_resolved = true;
-    char ipbuf[16];
-    microlink_ip_to_str(ip, ipbuf);
-    ESP_LOGI(TAG, "[TS] gateway name resolved via peer table: %s", ipbuf);
+
+    /* 2) NVS cache: the fast path — the answer survives reboots and does
+     * not depend on the peer table (which may be full or not yet mapped). */
+    if (!s_gateway_resolved && !s_gateway_stale) {
+        uint32_t cached = ts_nvs_load_gateway_ip();
+        if (cached != 0) {
+            s_gateway_ip = cached;
+            s_gateway_resolved = true;
+            room_dns_hook_set(s_gateway_name, cached);
+            char ipbuf[16];
+            microlink_ip_to_str(cached, ipbuf);
+            ESP_LOGI(TAG, "[TS] gateway name %s -> %s (NVS cache)",
+                     s_gateway_name, ipbuf);
+            return;
+        }
+    }
+    if (!s_gateway_resolved && !s_wait_logged) {
+        ESP_LOGI(TAG, "[TS] gateway name %s not in peer table yet "
+                 "(cache or map pending)", s_gateway_name);
+        s_wait_logged = true;
+    }
+}
+
+void tailscale_manager_note_gateway_unreachable(void)
+{
+    if (strlen(s_gateway_name) == 0) {
+        return;
+    }
+    /* Drop the answer: lwIP stops resolving the name to the dead IP, and
+     * the next resolve re-reads the peer table (a changed gateway IP is
+     * then adopted). The NVS copy stays as last-known but is not re-used
+     * until a fresh answer arrives. */
+    room_dns_hook_set(s_gateway_name, 0);
+    s_gateway_resolved = false;
+    s_gateway_stale = true;
+    s_wait_logged = false;
+    ESP_LOGW(TAG, "[TS] gateway %s marked unreachable — re-resolving",
+             s_gateway_name);
 }
 
 /* esp-openclaw-node adaptation: the room node owns its WiFi station
@@ -190,7 +273,9 @@ static void ts_manager_task(void *pv)
     cfg.enable_derp = true;
     cfg.enable_stun = true;
     cfg.enable_disco = true;
-    cfg.max_peers = 16;
+    cfg.max_peers = 4;   /* FIELD 2026-10-21 (Fredrik): we only talk to the
+                          * gateway. The table is pinned to the priority peer
+                          * (the gateway) with LRU eviction for the rest. */
     cfg.priority_peer_ip = microlink_parse_ip(CONFIG_TS_PRIORITY_PEER_IP);
     if (cfg.priority_peer_ip != 0) {
         char ipbuf[16];

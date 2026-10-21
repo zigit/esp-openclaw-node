@@ -58,6 +58,16 @@ int tailscale_manager_state(void);
 /** Opaque microlink handle for socket creation (NULL when not inited). */
 microlink_t *tailscale_manager_handle(void);
 
+/**
+ * @brief Drop the cached gateway name -> IP answer after a failed connect.
+ *
+ * The room node calls this when its gateway connection fails: lwIP stops
+ * resolving the name to the dead IP, the next resolve re-reads the peer
+ * table, and a changed gateway IP is adopted. The NVS copy is kept as
+ * last-known but is not reused until a fresh answer arrives.
+ */
+void tailscale_manager_note_gateway_unreachable(void);
+
 #ifdef __cplusplus
 }
 #endif

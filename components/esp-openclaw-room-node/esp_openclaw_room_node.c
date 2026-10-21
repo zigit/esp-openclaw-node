@@ -727,6 +727,14 @@ static void operator_gateway_event(
     }
 }
 
+/* FIELD 2026-10-21 (Fredrik): the gateway's name -> IP answer can go stale
+ * (the gateway's VPN IP changes, or the cached answer dies with it). The
+ * board layer that owns the tailnet implements this weak hook to drop the
+ * answer so the next resolve re-reads the peer table. Default: no-op. */
+__attribute__((weak)) void esp_openclaw_room_note_gateway_unreachable(void)
+{
+}
+
 static void operator_event(
     esp_openclaw_node_handle_t client,
     esp_openclaw_node_event_t event,
@@ -763,6 +771,12 @@ static void operator_event(
     if (ready) {
         ESP_LOGI(TAG, "operator Talk session ready");
     } else {
+        if (event == ESP_OPENCLAW_NODE_EVENT_CONNECT_FAILED) {
+            /* The cached gateway answer may be the reason: drop it so the
+             * next resolve re-reads the peer table (a changed gateway IP
+             * is then adopted instead of dialling a dead address). */
+            esp_openclaw_room_note_gateway_unreachable();
+        }
         (void)schedule_operator_start(2000);
     }
 }
@@ -950,6 +964,12 @@ static void node_event(
     if (node_ready) node_session_missing = false;
     xSemaphoreGive(state_lock);
     refresh_home_facts();
+    if (event == ESP_OPENCLAW_NODE_EVENT_CONNECT_FAILED) {
+        /* The node client dials the same gateway name: a failed connect may
+         * mean the cached answer is dead (or the gateway moved). Drop it so
+         * the next resolve re-reads the peer table. */
+        esp_openclaw_room_note_gateway_unreachable();
+    }
     if (event == ESP_OPENCLAW_NODE_EVENT_CONNECTED) {
         /*
          * The session URI lands in NVS only after the first hello-ok, so the

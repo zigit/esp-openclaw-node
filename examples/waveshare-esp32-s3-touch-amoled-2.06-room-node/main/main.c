@@ -255,3 +255,11 @@ void app_main(void)
      * it waits internally for the room node's station to hold an address. */
     ESP_ERROR_CHECK(tailscale_manager_start());
 }
+
+/* FIELD 2026-10-21 (Fredrik): the room node calls this when a gateway
+ * connect fails — drop the cached gateway name -> IP answer so the next
+ * resolve re-reads the peer table. */
+void esp_openclaw_room_note_gateway_unreachable(void)
+{
+    tailscale_manager_note_gateway_unreachable();
+}
