@@ -24,11 +24,76 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
-#if FREERTOS_USE_TRACE_FACILITY
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
 #endif
+
+#if CONFIG_HEAP_TASK_TRACKING
+#include "esp_heap_task_info.h"
+#include <stdlib.h>
+
+/* Persistent totals array: the API keeps its order across calls when the
+ * array is left populated, so consecutive census stages diff cleanly. */
+#define CENSUS_MAX_TASK_TOTALS 64
+static heap_task_totals_t s_task_totals[CENSUS_MAX_TASK_TOTALS];
+static size_t s_num_totals;
+
+static void census_per_task(const char *stage, const char *tag)
+{
+    heap_task_info_params_t params = {0};
+    /* Partition 0 counts INTERNAL-only allocations (region caps & INTERNAL
+     * mask == INTERNAL). SPIRAM regions have no INTERNAL bit -> excluded. */
+    params.caps[0] = MALLOC_CAP_INTERNAL;
+    params.mask[0] = MALLOC_CAP_INTERNAL;
+    params.totals = s_task_totals;
+    params.num_totals = &s_num_totals;
+    params.max_totals = CENSUS_MAX_TASK_TOTALS;
+    /* blocks=NULL: totals only; scanning per-block details is too heavy
+     * for the teardown path. */
+    (void)heap_caps_get_per_task_info(&params);
+
+    /* Sort descending by held bytes: biggest holders print first. */
+    for (size_t a = 1; a < s_num_totals; a++) {
+        heap_task_totals_t key = s_task_totals[a];
+        size_t b = a;
+        while (b > 0 && s_task_totals[b - 1].size[0] < key.size[0]) {
+            s_task_totals[b] = s_task_totals[b - 1];
+            b--;
+        }
+        s_task_totals[b] = key;
+    }
+    size_t shown = 0;
+    uint32_t others_size = 0, others_count = 0;
+    for (size_t i = 0; i < s_num_totals; i++) {
+        if (s_task_totals[i].size[0] == 0) continue;
+        if (shown < 16) {
+            const char *name = pcTaskGetName(s_task_totals[i].task);
+            if (name == NULL) name = "(deleted-task)";
+            ESP_LOGW(tag, "[%s] held %-16s bytes=%u blocks=%u",
+                     stage, name,
+                     (unsigned)s_task_totals[i].size[0],
+                     (unsigned)s_task_totals[i].count[0]);
+            shown++;
+        } else {
+            others_size += s_task_totals[i].size[0];
+            others_count += s_task_totals[i].count[0];
+        }
+    }
+    if (others_count > 0) {
+        ESP_LOGW(tag, "[%s] held <others> bytes=%u blocks=%u "
+                 "(truncated from %u)", stage,
+                 (unsigned)others_size, (unsigned)others_count,
+                 (unsigned)s_num_totals);
+    }
+}
+#else
+static void census_per_task(const char *stage, const char *tag)
+{
+    (void)stage; (void)tag;
+}
+#endif /* CONFIG_HEAP_TASK_TRACKING */
 
 #define HEAP_CENSUS_TAG "room_heap"
 
@@ -65,6 +130,11 @@ void room_heap_census_log(const char *stage)
              (unsigned)info.minimum_free_bytes,
              (unsigned)info.largest_free_block);
 
+    /* Per-task held-byte attribution (requires HEAP_TASK_TRACKING):
+     * names the subsystem holding residual blocks after teardown —
+     * esp_peer / GMF / esp-sr / our code. Persistent order = diffable. */
+    census_per_task(stage, HEAP_CENSUS_TAG);
+
     /* IDF's own per-region lines (heap start, size, watermark). Heavy: gated
      * behind OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP — its multi-line ESP_LOGW
      * burst on the timer-adjacent teardown path contributed to a Tmr Svc
@@ -100,5 +170,5 @@ void room_heap_census_log(const char *stage)
         }
     }
     free(tasks);
-#endif
+#endif /* CONFIG_FREERTOS_USE_TRACE_FACILITY */
 }
