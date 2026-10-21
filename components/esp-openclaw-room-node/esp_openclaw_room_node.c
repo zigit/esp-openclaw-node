@@ -1693,11 +1693,24 @@ esp_err_t esp_openclaw_room_node_start(const esp_openclaw_room_node_config_t *co
         ESP_LOGE(TAG, "node connect request failed: %s", esp_err_to_name(connect_err));
         room_ui_set(ROOM_UI_ERROR, "Node connect");
     }
+    /* FIELD 2026-10-21: prime the operator client at boot, while the heap
+     * is pristine (this runs BEFORE tailscale_manager_start spawns the lane
+     * and its ~22KB of internal tenants). Retry loops thereafter only ever
+     * reconnect the existing client — the create path's internal churn
+     * (persisted-session load + 6KB worker stack spawn) can no longer lose
+     * the race in a fragmented heap, which is what NO_MEMd operator create
+     * forever in the referee-call logs (largest 7936 AND 6912). */
+    esp_err_t prime_err = start_operator_client();
+    ESP_LOGI(TAG, "operator client primed at boot: %s", esp_err_to_name(prime_err));
     ESP_LOGI(
         TAG,
         "room node ready; internal heap free=%u largest=%u, psram free=%u",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    /* Boot baseline: stack HWM map + block counts at the one healthy
+     * moment (everything resident, nothing fragmented yet). Diffs against
+     * post-teardown inventory name stack growth and shard drift. */
+    room_heap_census_log("boot_ready");
     return ESP_OK;
 }
