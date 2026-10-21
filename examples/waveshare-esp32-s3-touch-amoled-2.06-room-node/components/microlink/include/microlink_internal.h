@@ -297,6 +297,12 @@ typedef struct {
      * 'keypair unusable valid=0 initiator=0 last_rx=0' for the media peer,
      * which is what killed the ICE binding keepalive and the call). */
     uint64_t last_handshake_retry_ms;
+    /* FIELD 2026-10-21: last time we actually tried to SEND to this peer.
+     * The handshake-retry sweep uses this to target only the peers we
+     * really talk to — retrying the whole tailnet is crypto burn on the
+     * core that must serve the call (observed: a dozen retry lines per
+     * sweep for peers we never contact). */
+    uint64_t last_send_attempt_ms;
 } ml_peer_t;
 
 /* ============================================================================

@@ -183,6 +183,21 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
         }
     }
 
+    /* FIELD 2026-10-21: mark the peer as one we actually send to. The
+     * handshake-retry sweep uses this to target only the peers whose
+     * traffic matters (the media peer), instead of retrying the whole
+     * tailnet every sweep — which is crypto burn on the core that must
+     * serve the call. */
+    {
+        uint64_t now_ms = (uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
+        for (int i = 0; i < ml->peer_count; i++) {
+            if (memcmp(ml->peers[i].public_key, peer_public_key, 32) == 0) {
+                ml->peers[i].last_send_attempt_ms = now_ms;
+                break;
+            }
+        }
+    }
+
     esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
     if (err != ESP_OK) {
         /* FIELD 2026-10-19: the other silent ERR_MEM branch — log it (rate-
@@ -1906,15 +1921,38 @@ void ml_wg_mgr_task(void *arg) {
          * 5s-retry loop the 'WG voice lane start failed xN' defect had. */
         if (ml->wg_netif && now - last_handshake_retry_ms >= 5000) {
             last_handshake_retry_ms = now;
+            struct wireguard_device *dev =
+                (struct wireguard_device *)((struct netif *)ml->wg_netif)->state;
             for (int i = 0; i < ml->peer_count && i < ML_MAX_PEERS; i++) {
                 ml_peer_t *p = &ml->peers[i];
                 if (!p->active || p->wg_peer_index < 0) continue;
                 if (p->vpn_ip == 0) continue;
                 if (now - p->last_handshake_retry_ms < 15000) continue;
-                err_t up = wireguardif_peer_is_up(
-                    (struct netif *)ml->wg_netif,
-                    (u8_t)p->wg_peer_index, NULL, NULL);
-                if (up == ERR_OK) continue;   /* tunnel healthy */
+                /* FIELD 2026-10-21 (2nd pass): use the SEND-path health
+                 * check, not wireguardif_peer_is_up(). The latter accepts
+                 * 'keypair.valid', but wireguardif_output_to_peer()
+                 * (wireguardif.c:291) falls back to prev_keypair when
+                 * (!initiator && last_rx == 0) and then REFUSES to send:
+                 * 'keypair unusable (valid=0 initiator=0 last_rx=0)'.
+                 * A peer can therefore pass peer_is_up() and still be
+                 * unable to carry a single packet — which is exactly the
+                 * media peer, whose ICE binding keepalives then never
+                 * reached it and the call died. */
+                bool can_send = false;
+                if (dev && p->wg_peer_index < WIREGUARD_MAX_PEERS) {
+                    const struct wireguard_keypair *kp =
+                        &dev->peers[p->wg_peer_index].curr_keypair;
+                    can_send = kp->valid && (kp->initiator || kp->last_rx != 0);
+                }
+                if (can_send) continue;   /* tunnel can carry traffic */
+                /* Only peers we actually send to: retrying the whole
+                 * tailnet is crypto burn on the core that must serve the
+                 * call (a dozen retry lines per sweep for peers we never
+                 * contact). */
+                if (p->last_send_attempt_ms == 0 ||
+                    now - p->last_send_attempt_ms > 60000) {
+                    continue;
+                }
                 p->last_handshake_retry_ms = now;
                 (void)ml_wg_mgr_trigger_handshake(ml, p->vpn_ip);
                 ESP_LOGW(TAG,

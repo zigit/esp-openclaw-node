@@ -621,6 +621,31 @@ void ml_derp_tx_task(void *arg) {
 
         if (!ml->derp.connected) continue;
 
+        /* FIELD 2026-10-21: keep the DERP relay connection alive FROM THIS
+         * TASK (the socket's owner). The 60s NotePreferred keepalive was
+         * queued by the COORD task (prio 5) — the task most likely to be
+         * starved — and the far end resets an idle relay connection
+         * meanwhile: 'TLS write failed: -0x0050' (CONN_RESET) right before
+         * 'derp_send_packet FAILED' and 'DERP reconnect requested'. When the
+         * relay is down, the MEDIA peer's packets cannot leave the board at
+         * all (wg_derp_output_cb returns ERR_CONN), so its ICE binding
+         * keepalives never arrive and the call dies at the media layer.
+         * 20s is well inside typical server idle timeouts. */
+        {
+            static uint64_t last_derp_ping_ms = 0;
+            uint64_t now_ms = ml_get_time_ms();
+            if (now_ms - last_derp_ping_ms > 20000) {
+                last_derp_ping_ms = now_ms;
+                uint8_t preferred = 0x01;
+                if (derp_write_frame(ml, DERP_FRAME_NOTE_PREFERRED,
+                                     &preferred, 1) < 0) {
+                    ESP_LOGW(TAG, "DERP keepalive write failed — reconnecting");
+                    ml->derp.connected = false;
+                    xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                }
+            }
+        }
+
         /* ---- Phase 2: Poll for incoming DERP frames ---- */
         {
             int burst;
