@@ -313,11 +313,20 @@ static void dispatch_derp_frame(microlink_t *ml, uint8_t frame_type,
         break;
 
     case DERP_FRAME_PING:
-        /* Echo ping data back as PONG directly (single-threaded, safe to write) */
-        if (payload && payload_len > 0) {
-            ESP_LOGD(TAG, "DERP PING received, sending PONG");
-            derp_write_frame(ml, DERP_FRAME_PONG, payload, payload_len);
-        }
+        /* FIELD 2026-10-21 (field-proven): the DERP server's PING carries NO
+         * payload (a zero-length frame is dispatched with payload = NULL by
+         * derp_recv_frame_header). The old handler replied only when
+         * 'payload && payload_len > 0', so the board NEVER answered the
+         * server's ping: the server's idle timer expired and it reset the
+         * connection — 'TLS write failed: -0x0050' (CONN_RESET) on the NEXT
+         * write, with no local error and nothing to connect it to. When the
+         * relay is down the media peer's packets cannot leave the board
+         * (wg_derp_output_cb returns ERR_CONN), so its ICE binding
+         * keepalives never arrive and the call dies at the media layer.
+         * Always answer a PING, with or without a payload. */
+        ESP_LOGD(TAG, "DERP PING received, sending PONG (len=%d)",
+                 (int)payload_len);
+        derp_write_frame(ml, DERP_FRAME_PONG, payload, payload_len);
         break;
 
     case DERP_FRAME_PONG:
