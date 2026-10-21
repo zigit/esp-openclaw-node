@@ -60,9 +60,11 @@ extern "C" {
 #define ML_TASK_COORD_PRIO      5
 #define ML_TASK_COORD_CORE      1
 
-	/* FIELD 2026-10-21: shrink sized from measured HWM 5096 -> ship 7KB (37%% margin);
-	 * was 8KB. Internal residency kept (NVS flash ops). */
-#define ML_TASK_WG_MGR_STACK    (7 * 1024)
+	/* FIELD 2026-10-21: shrink sized from measured HWM 5096 -> ship 6KB (18%% margin,
+	 * measured on the flashed build). Was 8K. Internal residency kept (NVS flash ops);
+	 * this 1KB plus the peer_update queue relief is what lets the lane spawn after
+	 * the operator client is primed at boot. */
+#define ML_TASK_WG_MGR_STACK    (6 * 1024)
 #define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     1
 
@@ -72,7 +74,7 @@ extern "C" {
 #define ML_WG_RX_QUEUE_DEPTH    8
 #define ML_STUN_RX_QUEUE_DEPTH  4
 #define ML_COORD_CMD_QUEUE_DEPTH 4
-#define ML_PEER_UPDATE_QUEUE_DEPTH 400
+#define ML_PEER_UPDATE_QUEUE_DEPTH 64  /* FIELD 2026-10-21: was 400 (~1.6KB relief; coord throttles updates anyway) */
 
 /* Protocol limits */
 #define ML_MAX_PEERS            CONFIG_ML_MAX_PEERS
