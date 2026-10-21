@@ -630,15 +630,21 @@ void ml_derp_tx_task(void *arg) {
          * relay is down, the MEDIA peer's packets cannot leave the board at
          * all (wg_derp_output_cb returns ERR_CONN), so its ICE binding
          * keepalives never arrive and the call dies at the media layer.
-         * 20s is well inside typical server idle timeouts. */
+         *
+         * FRAME TYPE (field-proven 2026-10-21 23:49): the first attempt sent
+         * NOTE_PREFERRED (0x07) — that frame carries a PREFERENCE hint, it is
+         * NOT a keepalive, and the relay still reset the connection 45s in
+         * ('TLS write failed: -0x0050' at 23:49:09, then 'derp_send_packet
+         * FAILED' and 'DERP reconnect requested'). DERP has a dedicated
+         * KEEP_ALIVE frame (0x06) for exactly this, and the client already
+         * answers the server's PING (0x12) with a PONG (0x13). Use 0x06, with
+         * an interval well inside the server's idle timeout. */
         {
             static uint64_t last_derp_ping_ms = 0;
             uint64_t now_ms = ml_get_time_ms();
             if (now_ms - last_derp_ping_ms > 20000) {
                 last_derp_ping_ms = now_ms;
-                uint8_t preferred = 0x01;
-                if (derp_write_frame(ml, DERP_FRAME_NOTE_PREFERRED,
-                                     &preferred, 1) < 0) {
+                if (derp_write_frame(ml, DERP_FRAME_KEEP_ALIVE, NULL, 0) < 0) {
                     ESP_LOGW(TAG, "DERP keepalive write failed — reconnecting");
                     ml->derp.connected = false;
                     xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
