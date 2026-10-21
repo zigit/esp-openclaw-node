@@ -174,10 +174,22 @@ esp_err_t esp_openclaw_node_start_transport_for_active_source(
         .network_timeout_ms = 10000,
         .ping_interval_sec = ESP_OPENCLAW_NODE_WS_PING_INTERVAL_SEC,
         .pingpong_timeout_sec = ESP_OPENCLAW_NODE_WS_PINGPONG_TIMEOUT_SEC,
+        /* FIELD 2026-10-21: the control socket's liveness must outrank the
+         * call stack. lwIP's TCP keepalive aborts the socket after
+         * keep_idle + count*interval of IDLE (tcp.c:1346) — with 5/5/3 that
+         * is 20s, and the app-level PING that is supposed to reset that timer
+         * is sent by websocket_task, which ran at prio 11: BELOW the call
+         * stack (pc_task 18, tiT 18, AUD_SRC 15). Under call load the PING
+         * was late, lwIP aborted the PCB locally (ERR_ABRT = errno 113
+         * "Software caused connection abort"), the peer saw a RST and
+         * logged code=1006 — the classic "network fault" that was never a
+         * network fault. The websocket task now ties AUD_SRC (15): same
+         * priority round-robins, so the PING always goes out, while the
+         * 18-prio tasks still win. */
         .keep_alive_enable = true,
-        .keep_alive_idle = 5,
+        .keep_alive_idle = 10,
         .keep_alive_interval = 5,
-        .keep_alive_count = 3,
+        .keep_alive_count = 5,
         .task_prio = ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY,
         .task_stack = ESP_OPENCLAW_NODE_TRANSPORT_TASK_STACK_SIZE,
         .buffer_size = ESP_OPENCLAW_NODE_TRANSPORT_BUFFER_SIZE,
