@@ -328,6 +328,44 @@ static void ts_manager_task(void *pv)
                                     "%s[%d]=%s:dp%d", i ? " " : "", i, pb, info.direct_path);
                 }
                 ESP_LOGI(TAG, "[TS] heartbeatalive %s peers=%d | %s", ipbuf, np, peers_desc);
+                /* Diag 2026-10-21: heartbeatalive heap line + 3 lowest
+                 * stack-HWM tasks. Catch the observed slow internal drift
+                 * (largest 3968->1856 over ~6min, no call running) and give
+                 * the coord/wg_mgr stack-shrink work real headroom numbers.
+                 * Static buffers only (timer-adjacent task path). */
+                ESP_LOGW(TAG, "[TS][heap hb] int_free=%u int_largest=%u "
+                         "psram_free=%u",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_largest_free_block(
+                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+                {
+                    static TaskStatus_t hb_stat[40];
+                    UBaseType_t cnt = uxTaskGetNumberOfTasks();
+                    UBaseType_t cap = cnt > 40 ? 40 : cnt;
+                    UBaseType_t got = uxTaskGetSystemState(hb_stat, cap, NULL);
+                    /* Print the 3 lowest-HWM tasks (repeated selection;
+                     * printing only, array order untouched). */
+                    bool printed[40] = {false};
+                    for (int sel = 0; sel < 3 && got > 0; sel++) {
+                        UBaseType_t lo = 0;
+                        bool have = false;
+                        for (UBaseType_t i = 0; i < got; i++) {
+                            if (printed[i]) continue;
+                            if (!have || hb_stat[i].usStackHighWaterMark <
+                                hb_stat[lo].usStackHighWaterMark) {
+                                lo = i; have = true;
+                            }
+                        }
+                        if (!have) break;
+                        printed[lo] = true;
+                        ESP_LOGW(TAG, "[TS][stack hb] %-16s hwm=%u",
+                                 hb_stat[lo].pcTaskName,
+                                 (unsigned)hb_stat[lo].usStackHighWaterMark);
+                    }
+                }
+#endif
             }
             hb = 0;
         }
