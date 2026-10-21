@@ -65,6 +65,10 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 # (agent_recv_one_packet, srtp_unprotect, rtp_jitter_add) plus taskLVGL redraw
 # also starving IDLE1 during calls — same call-load signature as CPU0.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+# 2026-10-21 diagnostic: dual ws-abort fault snapshot — lwip_stats read in
+# esp_openclaw_node_lwip_diag_dump() at ws DISCONNECTED/ERROR with captured
+# TLS failure. Diagnostic build; revisit once the aborter is named.
+CONFIG_LWIP_STATS=y
 
 # --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
 CONFIG_TS_ENABLE=y

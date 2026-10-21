@@ -6,6 +6,7 @@
 
 #include "esp_openclaw_node_internal.h"
 #include "esp_openclaw_node_transport_diag.h"
+#include "esp_openclaw_node_lwip_diag.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -339,19 +340,30 @@ static void websocket_event_handler(
     }
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED: {
+        esp_err_t disconnect_local_err = local_err_from_ws_event(data);
+        /* Fault snapshot: name the exhausted lwIP resource at the moment
+         * of death (2026-10-21 dual-abort diagnosis). Fires only when the
+         * event carries a captured failure; clean closes stay quiet. */
+        if (disconnect_local_err != ESP_OK) {
+            esp_openclaw_node_lwip_diag_dump("ws disconnected");
+        }
         esp_openclaw_node_work_message_t message = {
             .type = ESP_OPENCLAW_NODE_WORK_MSG_WS_DISCONNECTED,
             .transport_id = transport_ctx->transport_id,
-            .local_err = local_err_from_ws_event(data),
+            .local_err = disconnect_local_err,
         };
         esp_openclaw_node_enqueue_work_message_from_callback(node, &message);
         break;
     }
     case WEBSOCKET_EVENT_ERROR: {
+        esp_err_t error_local_err = local_err_from_ws_event(data);
+        if (error_local_err != ESP_OK) {
+            esp_openclaw_node_lwip_diag_dump("ws error");
+        }
         esp_openclaw_node_work_message_t message = {
             .type = ESP_OPENCLAW_NODE_WORK_MSG_WS_ERROR,
             .transport_id = transport_ctx->transport_id,
-            .local_err = local_err_from_ws_event(data),
+            .local_err = error_local_err,
         };
         esp_openclaw_node_enqueue_work_message_from_callback(node, &message);
         break;
