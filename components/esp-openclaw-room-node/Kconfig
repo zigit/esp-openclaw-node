@@ -1,5 +1,14 @@
 menu "OpenClaw room node"
 
+config OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP
+    bool "Heap census: verbose per-region dump"
+    default n
+    help
+        Enables heap_caps_print_heap_info in room_heap_census_log. The one-line
+        census summaries and block counts always print; this adds the multi-line
+        IDF per-region dump. Heavy: contributed to a Tmr Svc stack overflow under
+        heap pressure (2026-10-21). Enable only for targeted captures.
+
 config OPENCLAW_ROOM_WIFI_SSID
     string "Wi-Fi SSID"
     default ""

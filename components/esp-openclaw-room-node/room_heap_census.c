@@ -32,6 +32,12 @@
 
 #define HEAP_CENSUS_TAG "room_heap"
 
+#if CONFIG_OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP
+#define HEAP_CENSUS_REGION_DUMP() heap_caps_print_heap_info(internal8)
+#else
+#define HEAP_CENSUS_REGION_DUMP() ((void)0)
+#endif
+
 void room_heap_census_log(const char *stage)
 {
     const uint32_t internal8 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -59,8 +65,11 @@ void room_heap_census_log(const char *stage)
              (unsigned)info.minimum_free_bytes,
              (unsigned)info.largest_free_block);
 
-    /* IDF's own per-region lines (heap start, size, watermark). */
-    heap_caps_print_heap_info(internal8);
+    /* IDF's own per-region lines (heap start, size, watermark). Heavy: gated
+     * behind OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP — its multi-line ESP_LOGW
+     * burst on the timer-adjacent teardown path contributed to a Tmr Svc
+     * stack overflow under heap pressure (2026-10-21, decoded backtrace). */
+    HEAP_CENSUS_REGION_DUMP();
 
 #if FREERTOS_USE_TRACE_FACILITY
     UBaseType_t count = uxTaskGetNumberOfTasks();
