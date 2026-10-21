@@ -52,11 +52,17 @@ extern "C" {
 #define ML_TASK_DERP_TX_PRIO    5
 #define ML_TASK_DERP_TX_CORE    0
 
-#define ML_TASK_COORD_STACK     (12 * 1024)
+	/* FIELD 2026-10-21: shrink sized from measured HWM (watch list, heartbeatalive):
+	 * coord HWM 6208 -> ship 9KB (33%% margin); was 12KB. Guarantees-internal (NVS
+	 * flash ops) so residency stays, but the freed 3KB slab at boot was starving
+	 * the operator client create (ESP_ERR_NO_MEM when largest < 8KB). */
+#define ML_TASK_COORD_STACK     (9 * 1024)
 #define ML_TASK_COORD_PRIO      5
 #define ML_TASK_COORD_CORE      1
 
-#define ML_TASK_WG_MGR_STACK    (8 * 1024)
+	/* FIELD 2026-10-21: shrink sized from measured HWM 5096 -> ship 7KB (37%% margin);
+	 * was 8KB. Internal residency kept (NVS flash ops). */
+#define ML_TASK_WG_MGR_STACK    (7 * 1024)
 #define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     1
 
