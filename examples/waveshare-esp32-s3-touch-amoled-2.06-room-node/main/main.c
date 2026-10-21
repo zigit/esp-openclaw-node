@@ -244,6 +244,13 @@ void app_main(void)
             .safe_inset = 32,
             .animated_face = true,
             .animation_frame_ms = 16,
+            /* FIELD 2026-10-21: the board left idle_brightness unset, so
+             * room_ui_target_brightness() computed 0 for ROOM_UI_IDLE and the
+             * panel was driven to brightness 0 — the screen went BLACK when a
+             * call ended (the face is hidden in IDLE anyway). Not a panel
+             * fault, and not the cause of the call failure: a state-driven
+             * brightness. 18%% matches the other text states. */
+            .idle_brightness = 18,
         },
         .audio = {
             .open = waveshare_audio_open,
