@@ -26,6 +26,7 @@
 
 #include "microlink.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
 #include "room_dns_hook.h"
 
 /* sdkconfig.h defines bool Kconfig symbols only when set — provide the
@@ -35,6 +36,21 @@
 #endif
 
 static const char *TAG = "ts_manager";
+
+/* Bring-up heap instrumentation (diag 2026-10-21): the lane bring-up consumed
+ * ~31KB internal between "room node ready" (40110) and first connect (~8.6K)
+ * without a call running — while dual-AFE residency had just consumed its
+ * upfront share too. One-liner at each stage boundary names the consumer;
+ * remove after the whale is found. */
+static void ts_heap_stage(const char *stage)
+{
+    ESP_LOGW(TAG, "[TS][heap @%s] int_free=%u int_largest=%u psram_free=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
 
 /* Serial discipline (spike-proven 2026-10-17: per-datagram INFO logging on
  * USB-CDC builds standing queues and starves the RX task). Pin microlink's
@@ -163,6 +179,7 @@ static void ts_manager_task(void *pv)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
     ESP_LOGI(TAG, "[TS] WiFi up — initializing microlink");
+    ts_heap_stage("pre:init");
     ts_quiet_logs();
 
     microlink_config_t cfg = {0};
@@ -199,6 +216,7 @@ static void ts_manager_task(void *pv)
         vTaskDelete(NULL);
         return;
     }
+    ts_heap_stage("post:init");
 
     esp_err_t err = microlink_start(s_ml);
     if (err != ESP_OK) {
@@ -208,6 +226,7 @@ static void ts_manager_task(void *pv)
         return;
     }
     s_started = true;
+    ts_heap_stage("post:start");
 
     /* State watcher: transitions + heartbeat + echo-lane lifecycle.
      * The clawkie WG voice lane (udp/9100 protocol swap) is intentionally
@@ -247,6 +266,7 @@ static void ts_manager_task(void *pv)
                 if (esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
                     ESP_LOGI(TAG, "[TS] DNS -> VM2:5354 forwarder (MagicDNS via WG lane)");
                     dns_redirected = true;
+                    ts_heap_stage("connected");
                 } else {
                     ESP_LOGW(TAG, "[TS] set_dns_info failed — ts.net names stay unresolvable");
                 }
