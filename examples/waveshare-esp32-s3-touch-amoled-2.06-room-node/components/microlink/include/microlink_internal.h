@@ -57,6 +57,29 @@ extern "C" {
  * the control websocket: 50 consecutive connect timeouts), and below
  * the audio-realtime floor (15) and the radio layers (23).
  * Everything else in this component is stock fugo101 @216da33. */
+/* EXPERIMENT (2026-10-22): local adaptations on top of fugo101
+ * microlink @216da33. TWO of them, both field-measured on this board:
+ *
+ * 1. THE CPU FIX: the four network task priorities 7/5/5/7 -> 11. On a
+ *    device that also runs an audio DSP pipeline, the media tasks
+ *    (prio 10-15) starve these tasks at 5/7 completely -> the WG tunnel
+ *    goes dark when a call starts, STUN goes unanswered, DERP writes
+ *    stall past the derper's 2s write deadline -> RST -> the media
+ *    peer's keepalives stop -> the gateway's 30s timeout kills every
+ *    call ~44s in. Idle is always clean. 11 sits above the media tasks
+ *    (10), LEVEL with the TLS/websocket client tasks (11, time-sliced -
+ *    12 preempted the handshake and broke the control websocket: 50
+ *    consecutive connect timeouts), and below the audio-realtime floor
+ *    (15) and the radio layers (23).
+ *
+ * 2. STACK SIZES: coord 12K -> 9K, wg_mgr 8K -> 6K. With the stock
+ *    sizes the coord task FAILED TO SPAWN on this board ('microlink:
+ *    Failed to create coord task') -- internal RAM is shared with the
+ *    audio pipeline, and the 12K request did not fit. The reduced sizes
+ *    are measured high-water marks from a working build (coord HWM
+ *    6208, wg_mgr HWM 5096) with margin. This is a device-fit change,
+ *    not a behaviour change.
+ */
 #define ML_TASK_NET_IO_PRIO     11
 #define ML_TASK_NET_IO_CORE     0
 
@@ -64,11 +87,11 @@ extern "C" {
 #define ML_TASK_DERP_TX_PRIO    11
 #define ML_TASK_DERP_TX_CORE    0
 
-#define ML_TASK_COORD_STACK     (12 * 1024)
+#define ML_TASK_COORD_STACK     (9 * 1024)
 #define ML_TASK_COORD_PRIO      11
 #define ML_TASK_COORD_CORE      1
 
-#define ML_TASK_WG_MGR_STACK    (8 * 1024)
+#define ML_TASK_WG_MGR_STACK    (6 * 1024)
 #define ML_TASK_WG_MGR_PRIO     11
 #define ML_TASK_WG_MGR_CORE     1
 
