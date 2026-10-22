@@ -1,0 +1,7 @@
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+.DS_Store
+components/version/version.h
+sdkconfig.credentials

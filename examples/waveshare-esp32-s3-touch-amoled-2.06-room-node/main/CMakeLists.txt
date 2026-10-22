@@ -19,4 +19,5 @@ idf_component_register(
         freertos
         lvgl__lvgl
         media_lib_utils
+        tailscale_manager
         waveshare__esp32_s3_touch_amoled_2_06)

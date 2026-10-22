@@ -1,4 +1,5 @@
 #include "esp_openclaw_room_node.h"
+#include "tailscale_manager.h"
 
 #include "bsp/esp-bsp.h"
 #include "esp_check.h"
@@ -220,8 +221,17 @@ static esp_err_t waveshare_audio_open(
 
 void app_main(void)
 {
+    /* FIELD 2026-10-21 (Fredrik): install the cached gateway name -> IP
+     * answer BEFORE the room node primes its node/operator clients — those
+     * start connecting within ~100ms of esp_openclaw_room_node_start(),
+     * while the tailnet lane (and the peer table it feeds) only comes up
+     * seconds later. Without this the first connects die on
+     * CANNOT_RESOLVE_HOSTNAME. */
+    esp_err_t gw_prep = tailscale_manager_prepare_gateway();
+    ESP_LOGI(TAG, "gateway resolver prepared: %s", esp_err_to_name(gw_prep));
+
     const esp_openclaw_room_node_config_t config = {
-        .display_name = "OpenClaw AMOLED Room Node",
+        .display_name = "Waveshare AMOLED Room Node",
         .model_identifier = "waveshare-esp32-s3-touch-amoled-2.06",
         .display = {
             .start = waveshare_display_start,
@@ -234,6 +244,13 @@ void app_main(void)
             .safe_inset = 32,
             .animated_face = true,
             .animation_frame_ms = 16,
+            /* FIELD 2026-10-21: the board left idle_brightness unset, so
+             * room_ui_target_brightness() computed 0 for ROOM_UI_IDLE and the
+             * panel was driven to brightness 0 — the screen went BLACK when a
+             * call ended (the face is hidden in IDLE anyway). Not a panel
+             * fault, and not the cause of the call failure: a state-driven
+             * brightness. 18%% matches the other text states. */
+            .idle_brightness = 18,
         },
         .audio = {
             .open = waveshare_audio_open,
@@ -244,7 +261,30 @@ void app_main(void)
             .playback_gain_db = 6.0f,
             .configure_input_gain = true,
             .input_gain_db = 30.0f,
+            /* FIELD 2026-10-21 (Fredrik): the ES7210 is a 2-mic ADC — the 'R'
+             * channel is MIC3, NOT a loopback of the speaker. So there is no
+             * real AEC reference: the speaker's own voice reached the
+             * uplink, the gateway interrupted itself, and the voice session
+             * was torn down mid-reply (dual ws abort ~20s after every call
+             * opened — errno 113 'Software caused connection abort' = the
+             * peer's RST, not a network fault). Force half-duplex: the mic
+             * is muted while the speaker plays (+300 ms tail). */
+            .force_half_duplex_capture = true,
         },
     };
     ESP_ERROR_CHECK(esp_openclaw_room_node_start(&config));
+
+    /* Tailnet lane: connectivity layer only — the gateway URI and its
+     * credentials stay provisioning items (NVS, USB setup flow). The
+     * manager is flag-gated (CONFIG_TS_ENABLE) and no-ops when disabled;
+     * it waits internally for the room node's station to hold an address. */
+    ESP_ERROR_CHECK(tailscale_manager_start());
+}
+
+/* FIELD 2026-10-21 (Fredrik): the room node calls this when a gateway
+ * connect fails — drop the cached gateway name -> IP answer so the next
+ * resolve re-reads the peer table. */
+void esp_openclaw_room_note_gateway_unreachable(void)
+{
+    tailscale_manager_note_gateway_unreachable();
 }
