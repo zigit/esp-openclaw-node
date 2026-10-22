@@ -569,51 +569,6 @@ static void dump_unknown_peer_diag(microlink_t *ml, const uint8_t *sender_disco_
     }
 }
 
-/* FIELD (2026-10-22): choose which of the map's endpoints to install.
- *
- * The map advertises SEVERAL endpoints per peer (e.g. for the gateway:
- * 80.217.53.8:41644, 80.217.53.8:1039 and 192.168.0.124:41641) and the old
- * code always took endpoints[0] -- the WAN one. When both ends sit on the
- * same LAN, the LAN address is the better path: no NAT, no hairpin, no
- * dependence on a derper being shared.
- *
- * So prefer an endpoint in OUR OWN subnet; fall back to the first
- * advertised one otherwise (the previous behaviour, which is all a
- * NAT'd peer ever has). */
-static bool ml_endpoint_is_local(uint32_t ip) {
-    if (ip == 0) return false;
-    /* Compare against OUR STA address: the VPN net (100.64.0.0/10) is the
-     * WireGuard overlay, not the LAN we want to match. */
-    esp_netif_ip_info_t info;
-    if (esp_netif_get_ip_info(esp_netif_get_default_netif(), &info) != ESP_OK) {
-        return false;
-    }
-    uint32_t our = ntohl(info.ip.addr);
-    uint32_t cand = ntohl(ip);
-    if (our == 0) return false;
-    return (our >> 24) == (cand >> 24);
-}
-
-static int ml_pick_endpoint(const ml_peer_update_t *update, uint32_t *out_ip,
-                            uint16_t *out_port) {
-    if (!update || !out_ip || !out_port) return 0;
-    for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
-        if (update->endpoints[i].ip == 0) continue;
-        if (ml_endpoint_is_local(update->endpoints[i].ip)) {
-            *out_ip = update->endpoints[i].ip;
-            *out_port = update->endpoints[i].port;
-            return 1;
-        }
-    }
-    for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
-        if (update->endpoints[i].ip == 0) continue;
-        *out_ip = update->endpoints[i].ip;
-        *out_port = update->endpoints[i].port;
-        return 1;
-    }
-    return 0;
-}
-
 static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* Peer allowlist filter: don't waste WG slots on non-allowed peers.
      * Still process updates for existing peers (they may become allowed later). */
@@ -988,18 +943,15 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
          *
          * So: install the map's endpoint when the map provided one, and
          * leave it BLANK when only the stale NVS copy exists. */
-        uint32_t pick_ip = 0;
-        uint16_t pick_port = 0;
-        if (ml_pick_endpoint(update, &pick_ip, &pick_port)) {
-            uint8_t ea = (pick_ip >> 24) & 0xFF;
-            uint8_t eb = (pick_ip >> 16) & 0xFF;
-            uint8_t ec = (pick_ip >> 8) & 0xFF;
-            uint8_t ed = pick_ip & 0xFF;
+        if (update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+            uint8_t ea = (update->endpoints[0].ip >> 24) & 0xFF;
+            uint8_t eb = (update->endpoints[0].ip >> 16) & 0xFF;
+            uint8_t ec = (update->endpoints[0].ip >> 8) & 0xFF;
+            uint8_t ed = update->endpoints[0].ip & 0xFF;
             IP4_ADDR(&wg_peer.endpoint_ip.u_addr.ip4, ea, eb, ec, ed);
-            wg_peer.endport_port = pick_port;
-            ESP_LOGW(TAG, "WG peer %s: installed MAP endpoint %u.%u.%u.%u:%u%s",
-                     p->hostname, ea, eb, ec, ed, pick_port,
-                     ml_endpoint_is_local(pick_ip) ? " (same LAN)" : "");
+            wg_peer.endport_port = update->endpoints[0].port;
+            ESP_LOGW(TAG, "WG peer %s: installed MAP endpoint %u.%u.%u.%u:%u",
+                     p->hostname, ea, eb, ec, ed, p->endpoints[0].port);
         } else {
             ip_addr_set_any(false, &wg_peer.endpoint_ip);
             wg_peer.endport_port = 0;
@@ -1071,30 +1023,21 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * 41643 -> 41644 -> 41646 and the board kept using the stale one).
      * The STALE copy is the NVS one, and the endpoint gate above keeps
      * that out of the device. */
-    {
-        uint32_t pick_ip = 0;
-        uint16_t pick_port = 0;
-        bool have_pick = ml_pick_endpoint(update, &pick_ip, &pick_port);
-        /* Refresh the map endpoint only when we have NO DISCO-validated path:
-         * a validated path (best_ip/best_port, installed by the pong
-         * handler) is better than any advertised one, and overwriting it
-         * would throw away a working LAN path. */
-        if (is_update && ml->wg_netif && p->wg_peer_index >= 0 && have_pick &&
-            !(p->has_direct_path && p->best_ip != 0)) {
-            struct netif *netif = (struct netif *)ml->wg_netif;
-            ip_addr_t ep_ip;
-            IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
-            ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(pick_ip));
-            wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
-                                         &ep_ip, pick_port);
-            ESP_LOGW(TAG, "WG peer %s: refreshed MAP endpoint to %u.%u.%u.%u:%u%s",
-                     p->hostname,
-                     (unsigned)((pick_ip >> 24) & 0xFF),
-                     (unsigned)((pick_ip >> 16) & 0xFF),
-                     (unsigned)((pick_ip >> 8) & 0xFF),
-                     (unsigned)(pick_ip & 0xFF), pick_port,
-                     ml_endpoint_is_local(pick_ip) ? " (same LAN)" : "");
-        }
+    if (is_update && ml->wg_netif && p->wg_peer_index >= 0 &&
+        update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+        struct netif *netif = (struct netif *)ml->wg_netif;
+        ip_addr_t ep_ip;
+        IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(update->endpoints[0].ip));
+        wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+                                     &ep_ip, update->endpoints[0].port);
+        ESP_LOGW(TAG, "WG peer %s: refreshed MAP endpoint to %u.%u.%u.%u:%u",
+                 p->hostname,
+                 (unsigned)((update->endpoints[0].ip >> 24) & 0xFF),
+                 (unsigned)((update->endpoints[0].ip >> 16) & 0xFF),
+                 (unsigned)((update->endpoints[0].ip >> 8) & 0xFF),
+                 (unsigned)(update->endpoints[0].ip & 0xFF),
+                 update->endpoints[0].port);
     }
 
     /* Persist to NVS for fast boot next time */
