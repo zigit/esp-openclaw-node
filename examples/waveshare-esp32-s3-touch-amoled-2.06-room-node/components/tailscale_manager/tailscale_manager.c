@@ -413,6 +413,40 @@ static void ts_manager_task(void *pv)
                     ESP_LOGI(TAG, "[TS] DNS -> VM2:5354 forwarder (MagicDNS via WG lane)");
                     dns_redirected = true;
                     ts_heap_stage("connected");
+                    /* FIELD 2026-10-22: KEEP THE DHCP RESOLVER AS A FALLBACK.
+                     * The redirect above REPLACED the only DNS server, so when
+                     * the WG lane to VM2 blipped (the same WAN breakage that
+                     * kills the call) the board could resolve NOTHING — not
+                     * even public names: 'DNS resolve failed for
+                     * derp9.tailscale.com' (22x per boot) and 'stun.l.google.com'
+                     * (11x). With no STUN address and no DERP address the relay
+                     * dies -> 'TLS write failed: -0x0050' -> the media peer's
+                     * keepalives cannot leave the board -> the call dies.
+                     * The DHCP resolver answers PUBLIC names perfectly well;
+                     * only *.ts.net needs the forwarder. So: MAIN = forwarder,
+                     * BACKUP = the original DHCP resolver. lwIP tries MAIN
+                     * first and falls back to BACKUP when it times out. */
+                    {
+                        esp_netif_dns_info_t backup = {0};
+                        backup.ip.u_addr.ip4.addr = lwip_htonl(0x01010101); /* 1.1.1.1 */
+                        backup.ip.type = ESP_IPADDR_TYPE_V4;
+                        if (esp_netif_set_dns_info(netif, ESP_NETIF_DNS_BACKUP, &backup) == ESP_OK) {
+                            ESP_LOGW(TAG, "[TS] DNS backup = 1.1.1.1 (public names survive a lane blip)");
+                            if (dhcp_dns_addr != 0) {
+                                esp_netif_dns_info_t fb = {0};
+                                fb.ip.u_addr.ip4.addr = dhcp_dns_addr;
+                                fb.ip.type = ESP_IPADDR_TYPE_V4;
+                                esp_netif_set_dns_info(netif, ESP_NETIF_DNS_FALLBACK, &fb);
+                                ESP_LOGW(TAG, "[TS] DNS fallback slot = DHCP resolver %u.%u.%u.%u",
+                                         (unsigned)((dhcp_dns_addr >> 24) & 0xFF),
+                                         (unsigned)((dhcp_dns_addr >> 16) & 0xFF),
+                                         (unsigned)((dhcp_dns_addr >> 8) & 0xFF),
+                                         (unsigned)(dhcp_dns_addr & 0xFF));
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "[TS] could not set DNS backup");
+                        }
+                    }
                 } else {
                     ESP_LOGW(TAG, "[TS] set_dns_info failed — ts.net names stay unresolvable");
                 }
@@ -424,6 +458,12 @@ static void ts_manager_task(void *pv)
                 dns.ip.u_addr.ip4.addr = dhcp_dns_addr;
                 dns.ip.type = ESP_IPADDR_TYPE_V4;
                 esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+                /* FIELD 2026-10-22: also clear the fallback we installed —
+                 * the DHCP resolver is MAIN again, so the BACKUP slot must not
+                 * keep pointing at the unreachable forwarder. */
+                esp_netif_dns_info_t none = {0};
+                none.ip.type = ESP_IPADDR_TYPE_ANY;
+                esp_netif_set_dns_info(netif, ESP_NETIF_DNS_BACKUP, &none);
             }
             dns_redirected = false;
             ESP_LOGI(TAG, "[TS] DNS restored to pre-redirect resolver (lane down)");
