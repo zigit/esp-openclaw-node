@@ -4,3 +4,7 @@
 [submodule "third_party/esp-protocols"]
 	path = third_party/esp-protocols
 	url = https://github.com/espressif/esp-protocols.git
+[submodule "third_party/microlink"]
+	path = third_party/microlink
+	url = https://github.com/studioalight/microlink.git
+	branch = openclaw/room-node
