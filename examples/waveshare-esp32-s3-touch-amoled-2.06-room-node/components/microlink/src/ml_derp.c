@@ -313,11 +313,14 @@ static void dispatch_derp_frame(microlink_t *ml, uint8_t frame_type,
         break;
 
     case DERP_FRAME_PING:
-        /* Echo ping data back as PONG directly (single-threaded, safe to write) */
-        if (payload && payload_len > 0) {
-            ESP_LOGD(TAG, "DERP PING received, sending PONG");
-            derp_write_frame(ml, DERP_FRAME_PONG, payload, payload_len);
-        }
+        /* ADOPTION STEP 8: answer UNCONDITIONALLY. The stock handler only
+         * replied when the frame carried a payload, silently dropping a
+         * zero-length PING (dispatched with payload=NULL) -- the server
+         * sees a client that ignores its liveness probe. Reply whether or
+         * not the PING carries data; an empty PONG is the correct response
+         * to an empty PING. */
+        ESP_LOGD(TAG, "DERP PING received, sending PONG (len=%d)", (int)payload_len);
+        derp_write_frame(ml, DERP_FRAME_PONG, payload, payload_len);
         break;
 
     case DERP_FRAME_PONG:
@@ -490,6 +493,7 @@ void ml_derp_tx_task(void *arg) {
     uint64_t last_status_ms = 0;
     uint32_t loop_count = 0;
     uint64_t last_heartbeat_ms = 0;
+    uint64_t last_keepalive_ms = 0;  /* periodic client KEEP_ALIVE (0x06) */
     uint64_t connected_since_ms = 0;
     bool verbose_phase = false;  /* verbose logging for first 15s after connect */
 
@@ -606,6 +610,23 @@ void ml_derp_tx_task(void *arg) {
         }
 
         if (!ml->derp.connected) continue;
+
+        /* ADOPTION STEP 8: periodic client keepalive (0x06, no payload).
+         * The DERP connection traverses a NAT; without outbound traffic the
+         * mapping can expire mid-session and the next write finds a
+         * black-holed path. FrameKeepAlive (0x06) exists exactly for this;
+         * NOTE_PREFERRED (0x07) is a preference hint, NOT a keepalive. 20s
+         * is well inside typical NAT idle windows. Sent from THIS task --
+         * the socket's owner -- so it can never race a write. */
+        if (loop_start - last_keepalive_ms > 20000) {
+            last_keepalive_ms = loop_start;
+            if (derp_write_frame(ml, DERP_FRAME_KEEP_ALIVE, NULL, 0) < 0) {
+                ESP_LOGW(TAG, "DERP keepalive write failed");
+                ml->derp.connected = false;
+                xEventGroupSetBits(ml->events, ML_EVT_DERP_RECONNECT);
+                continue;
+            }
+        }
 
         /* ---- Phase 2: Poll for incoming DERP frames ---- */
         {
