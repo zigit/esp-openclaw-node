@@ -419,6 +419,17 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         }
     }
 
+    /* ADOPTION STEP 15 (peer cap): honour the CONFIGURED cap, not the
+     * compile-time array size. Stock 216da33 scans all ML_MAX_PEERS (16)
+     * slots, so with a ~26-peer tailnet the table fills with peers we never
+     * talk to -- observed: 'Peer table full (16 slots)' x10 per boot, 539
+     * 'DISCO PONG unmatched' per boot, and (worst) the GATEWAY itself
+     * rejected while unrelated hosts held the slots. The integrator sets
+     * max_peers (the tailscale_manager glue uses 4: we only talk to the
+     * gateway plus the per-call media peer), so the scan must respect it. */
+    int slots = ml->config.max_peers > 0 ? ml->config.max_peers : ML_MAX_PEERS;
+    if (slots > ML_MAX_PEERS) slots = ML_MAX_PEERS;
+
     /* Check if peer already exists */
     int idx = find_peer_by_key(ml, update->public_key);
     if (idx >= 0) {
@@ -426,7 +437,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     } else {
         /* Find free slot */
         idx = -1;
-        for (int i = 0; i < ML_MAX_PEERS; i++) {
+        for (int i = 0; i < slots; i++) {
             if (!ml->peers[i].active) {
                 idx = i;
                 break;
@@ -438,7 +449,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
             update->vpn_ip == ml->config.priority_peer_ip) {
             uint64_t oldest_ms = UINT64_MAX;
             int evict_idx = -1;
-            for (int i = 0; i < ML_MAX_PEERS; i++) {
+            for (int i = 0; i < slots; i++) {
                 if (!ml->peers[i].active) continue;
                 if (ml->peers[i].vpn_ip == ml->config.priority_peer_ip) continue;
                 uint64_t last_activity = ml->peers[i].last_send_ms;
@@ -470,7 +481,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
 
         if (idx < 0) {
             ESP_LOGW(TAG, "Peer table full (%d slots), cannot add %s",
-                     ML_MAX_PEERS, update->hostname);
+                     slots, update->hostname);
             return -1;
         }
         if (idx >= ml->peer_count) {
