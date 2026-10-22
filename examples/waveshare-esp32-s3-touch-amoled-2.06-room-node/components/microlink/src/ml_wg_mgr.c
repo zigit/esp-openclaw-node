@@ -434,6 +434,23 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         }
     }
 
+    /* FIELD (ported from the OpenClaw room node, field-proven 2026-10-21):
+     * an UPDATE for a peer we already hold must NOT tear down its live
+     * state. The coordination map re-delivers peers continuously, and the
+     * unconditional reset below ran on EVERY update:
+     *   (a) orphaned the peer's entry in the wireguard device (still valid
+     *       there, so peer_lookup_by_allowed_ip hands traffic to the STALE
+     *       entry -> 'keypair unusable' -> the peer's packets never leave);
+     *   (b) wiped the DISCO-validated direct endpoint (best_ip/best_port),
+     *       pushing the peer's traffic back onto DERP;
+     *   (c) dropped wg_peer_index, so the peer lost its WG slot entirely.
+     * Snapshot the live state here; restore it after the field copy. */
+    bool is_update = (idx >= 0);
+    int prev_wg_peer_index = is_update ? ml->peers[idx].wg_peer_index : -1;
+    bool prev_has_direct = is_update ? ml->peers[idx].has_direct_path : false;
+    uint32_t prev_best_ip = is_update ? ml->peers[idx].best_ip : 0;
+    uint16_t prev_best_port = is_update ? ml->peers[idx].best_port : 0;
+
     ml_peer_t *p = &ml->peers[idx];
     p->vpn_ip = update->vpn_ip;
     memcpy(p->public_key, update->public_key, 32);
@@ -443,24 +460,44 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->derp_region = update->derp_region;
     p->active = true;
 
-    /* Copy endpoints */
-    p->endpoint_count = update->endpoint_count;
-    for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
-        p->endpoints[i].ip = update->endpoints[i].ip;
-        p->endpoints[i].port = update->endpoints[i].port;
-        p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
+    /* Copy endpoints. FIELD (ported): an UPDATE without endpoints (the
+     * coord map usually carries none for a peer behind NAT) must not ERASE
+     * the endpoints we already discovered -- losing them pushes the peer's
+     * traffic onto the DERP relay. */
+    if (is_update && update->endpoint_count == 0) {
+        /* keep the discovered endpoints */
+    } else {
+        p->endpoint_count = update->endpoint_count;
+        for (int i = 0; i < update->endpoint_count && i < ML_MAX_ENDPOINTS; i++) {
+            p->endpoints[i].ip = update->endpoints[i].ip;
+            p->endpoints[i].port = update->endpoints[i].port;
+            p->endpoints[i].is_ipv6 = update->endpoints[i].is_ipv6;
+        }
     }
 
-    /* Initialize DISCO rate limiting state */
+    /* Initialize DISCO rate limiting state (timers only -- the path state
+     * fields are owned by the is_update branch below and must not be
+     * clobbered here). */
     p->last_ping_sent_ms = 0;
     p->last_pong_recv_ms = 0;
     p->trust_until_ms = 0;
     p->last_send_ms = 0;
     p->last_upgrade_ms = 0;
-    p->has_direct_path = false;
-    p->best_ip = 0;
-    p->best_port = 0;
-    p->wg_peer_index = -1;
+
+    if (is_update) {
+        /* Restore the live state snapshotted above: the WG slot, the
+         * DISCO-validated direct path and its endpoint must survive a
+         * coord-map update. */
+        p->wg_peer_index = prev_wg_peer_index;
+        p->has_direct_path = prev_has_direct;
+        p->best_ip = prev_best_ip;
+        p->best_port = prev_best_port;
+    } else {
+        p->has_direct_path = false;
+        p->best_ip = 0;
+        p->best_port = 0;
+        p->wg_peer_index = -1;
+    }
 
     char ip_str[16];
     microlink_ip_to_str(update->vpn_ip, ip_str);
@@ -469,8 +506,17 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              p->public_key[0], p->public_key[1], p->public_key[2], p->public_key[3],
              p->public_key[4], p->public_key[5], p->public_key[6], p->public_key[7]);
 
-    /* Add to wireguard-lwip */
-    if (ml->wg_netif) {
+    /* Add to wireguard-lwip. FIELD (ported, field-proven 2026-10-21): the
+     * condition is "does this peer already hold a WG slot", NOT "is this a
+     * new peer". A peer present in our table but WITHOUT a slot (loaded
+     * from the NVS cache at boot, or previously evicted) must be wired in
+     * here -- skipping it leaves the device with no peer for its IP and
+     * every route to it dies with ERR_CONN. A peer that ALREADY holds a
+     * slot must NOT be re-added: that creates a SECOND entry for the same
+     * public key, and peer_lookup_by_allowed_ip scans in order, so traffic
+     * can be handed to the stale duplicate. */
+    bool already_wired = (p->wg_peer_index >= 0);
+    if (ml->wg_netif && !already_wired) {
         struct netif *netif = (struct netif *)ml->wg_netif;
 
         /* Convert peer public key to base64 */
