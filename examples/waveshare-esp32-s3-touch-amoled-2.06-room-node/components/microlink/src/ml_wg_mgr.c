@@ -523,6 +523,34 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         return -1;  /* Silently skip — peer not in allowlist */
     }
 
+    /* FIELD 2026-10-22 (Fredrik: limit peers / DISCO filtering): re-add
+     * suppression for recently-evicted peers. The coord map re-delivers ALL
+     * tailnet peers continuously; with max_peers=4 (26 peers on this
+     * tailnet) the table churned constantly: every eviction was followed
+     * within seconds by the same peer's re-add, which evicted ANOTHER peer,
+     * sent CallMeMaybe and a forced disco ping (408 evictions logged; the
+     * resulting ~7-10 DERP frames/s at idle ride the same relay a call's
+     * keepalives depend on). A static allowlist cannot do this safely
+     * because the gateway mints a FRESH media peer identity for each call -
+     * so instead: if this exact peer was evicted within the window below,
+     * skip it. A genuinely new peer (the per-call media peer, or anything we
+     * have never evicted) passes untouched. The priority peer (the gateway)
+     * can never be evicted, so it is never suppressed. */
+    {
+        uint64_t now = ml_get_time_ms();
+        for (int i = 0; i < ml->peer_count; i++) {
+            if (ml->peers[i].active) continue;
+            if (ml->peers[i].evicted_at_ms == 0) continue;
+            if (memcmp(ml->peers[i].public_key, update->public_key, 32) != 0) continue;
+            if (now - ml->peers[i].evicted_at_ms < 60000) {
+                ESP_LOGI(TAG, "Suppressed re-add of recently evicted peer %s",
+                         ml->peers[i].hostname);
+                return -1;
+            }
+            /* Window expired: allow the re-add through. */
+        }
+    }
+
     /* Check if peer already exists */
     int idx = find_peer_by_key(ml, update->public_key);
     /* FIELD 2026-10-21: an UPDATE for a peer we already hold must NOT tear
@@ -589,6 +617,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                                             ml->peers[evict_idx].wg_peer_index);
                 }
                 ml->peers[evict_idx].active = false;
+                /* FIELD 2026-10-22: stamp the eviction so add_peer can
+                 * suppress the immediate re-add churn (see below). */
+                ml->peers[evict_idx].evicted_at_ms = ml_get_time_ms();
                 idx = evict_idx;
             }
         }
@@ -624,6 +655,9 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                 /* FIELD 2026-10-21: clear the slot index (the slot is
                  * reused; a stale index points at another peer's entry). */
                 ml->peers[evict_idx].wg_peer_index = -1;
+                /* FIELD 2026-10-22: stamp the eviction so add_peer can
+                 * suppress the immediate re-add churn (see below). */
+                ml->peers[evict_idx].evicted_at_ms = ml_get_time_ms();
                 idx = evict_idx;
             }
         }
@@ -815,8 +849,14 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
 
     /* Send CallMeMaybe to trigger peer-initiated handshake (NAT traversal).
      * Skip on cellular: our endpoints are behind carrier-grade NAT and
-     * unreachable — all traffic goes through DERP relay. */
-    if (!ml_at_socket_is_ready()) {
+     * unreachable — all traffic goes through DERP relay.
+     * FIELD 2026-10-22: also skip for UPDATES of already-held peers — the
+     * coord map re-delivers peers continuously, and CMM on every update was
+     * the main source of idle DERP traffic (~7-10 frames/s). The peer
+     * already has our endpoints from the first CMM; re-sending changes
+     * nothing but relay load. New peers (including the per-call media peer)
+     * still get their CMM. */
+    if (!is_update && !ml_at_socket_is_ready()) {
         disco_send_call_me_maybe(ml, idx);
     }
 
@@ -824,8 +864,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * Only force-ping if fewer than 5 peers added in the last second;
      * the periodic probe (every 15s) will handle the rest.
      * Skip on cellular: direct probes fill DERP TX queue (~0.6s each on AT socket),
-     * blocking time-critical WG handshake responses. */
-    if (!ml_at_socket_is_ready()) {
+     * blocking time-critical WG handshake responses.
+     * FIELD 2026-10-22: also skip for UPDATES — the periodic probe loop
+     * already handles path upgrades every 15s, and re-probing on every
+     * coord-map re-delivery was part of the idle DERP flood. */
+    if (!is_update && !ml_at_socket_is_ready()) {
         static uint64_t last_burst_ms = 0;
         static int burst_count = 0;
         uint64_t add_now = ml_get_time_ms();
