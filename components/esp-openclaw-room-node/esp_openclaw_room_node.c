@@ -116,6 +116,19 @@ static void talk_audio_snapshot(uint32_t generation, const char *stage)
 static void talk_snap_tick(void *arg)
 {
     talk_audio_snapshot((uint32_t)(uintptr_t)arg, "tick");
+    /* FIELD 2026-10-22: radio state at the cut second. The mid-call WAN
+     * break (STUN fail + DERP RST) survived BOTH the DNS fix (7df7dd1) and
+     * the peer-churn fix (4858227) — the call still dies ~40-50s in with no
+     * local wifi event logged. The one variable never yet observed is the
+     * wifi link itself at the moment of the break. RSSI every 5s during
+     * calls: if it craters at the cut second it's the radio/AP; if it stays
+     * steady the break is upstream (AP/router/ISP). */
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        ESP_LOGI(TAG, "room_talk_wifi rssi=%d chan=%d", ap.rssi, ap.primary);
+    } else {
+        ESP_LOGW(TAG, "room_talk_wifi: sta_get_ap_info FAILED — link down?");
+    }
 }
 
 static void refresh_home_facts(void)
