@@ -51,11 +51,19 @@ extern "C" {
 #define ML_TASK_DERP_TX_PRIO    5
 #define ML_TASK_DERP_TX_CORE    0
 
-#define ML_TASK_COORD_STACK     (12 * 1024)
+/* ADOPTION STEP 3 (field-measured on the Waveshare AMOLED board): the
+ * stock 12K coord stack DOES NOT FIT a device that also runs an audio
+ * pipeline — internal RAM is shared, and the spawn fails outright:
+ *   E microlink: Failed to create coord task
+ * and the tailnet never comes up. Measured high-water marks on the
+ * working deployment: coord HWM 6208 -> ship 9K (33% margin was too
+ * tight for the NVS flash-ops residency; 9K verified), wg_mgr HWM
+ * 5096 -> ship 6K (18% margin, verified on the flashed build). */
+#define ML_TASK_COORD_STACK     (9 * 1024)
 #define ML_TASK_COORD_PRIO      5
 #define ML_TASK_COORD_CORE      1
 
-#define ML_TASK_WG_MGR_STACK    (8 * 1024)
+#define ML_TASK_WG_MGR_STACK    (6 * 1024)
 #define ML_TASK_WG_MGR_PRIO     7
 #define ML_TASK_WG_MGR_CORE     1
 
