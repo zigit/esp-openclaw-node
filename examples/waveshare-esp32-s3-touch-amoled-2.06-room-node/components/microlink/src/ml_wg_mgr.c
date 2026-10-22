@@ -148,18 +148,30 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
      * died exactly like this: handshakes left, the gateway received
      * nothing, no error anywhere. Log the destination key for the priority
      * peer at WARN so it survives this tag's WARN pinning. */
-    if (ml->config.priority_peer_ip != 0) {
-        for (int i = 0; i < ml->peer_count; i++) {
-            if (!ml->peers[i].active) continue;
-            if (ml->peers[i].vpn_ip != ml->config.priority_peer_ip) continue;
-            if (memcmp(ml->peers[i].public_key, peer_public_key, 32) != 0) continue;
-            ESP_LOGW(TAG, "DERP OUT to priority peer %s: dest_key=%02x%02x%02x%02x%02x%02x%02x%02x len=%d",
-                     ml->peers[i].hostname,
+    {
+        static int derp_out_traced = 0;
+        if (derp_out_traced < 6) {
+            derp_out_traced++;
+            ESP_LOGW(TAG, "DERP OUT dest_key=%02x%02x%02x%02x%02x%02x%02x%02x len=%d",
                      peer_public_key[0], peer_public_key[1],
                      peer_public_key[2], peer_public_key[3],
                      peer_public_key[4], peer_public_key[5],
                      peer_public_key[6], peer_public_key[7], (int)len);
-            break;
+        }
+        /* One-shot: the priority peer's key as the TABLE knows it, so the
+         * destination key above can be compared against it. */
+        if (derp_out_traced == 1 && ml->config.priority_peer_ip != 0) {
+            for (int i = 0; i < ml->peer_count; i++) {
+                if (!ml->peers[i].active) continue;
+                if (ml->peers[i].vpn_ip != ml->config.priority_peer_ip) continue;
+                ESP_LOGW(TAG, "TABLE key for priority peer %s: %02x%02x%02x%02x%02x%02x%02x%02x (wg_slot=%d)",
+                         ml->peers[i].hostname,
+                         ml->peers[i].public_key[0], ml->peers[i].public_key[1],
+                         ml->peers[i].public_key[2], ml->peers[i].public_key[3],
+                         ml->peers[i].public_key[4], ml->peers[i].public_key[5],
+                         ml->peers[i].public_key[6], ml->peers[i].public_key[7],
+                         ml->peers[i].wg_peer_index);
+            }
         }
     }
 
@@ -660,6 +672,16 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     bool prev_has_direct = is_update ? ml->peers[idx].has_direct_path : false;
     uint32_t prev_best_ip = is_update ? ml->peers[idx].best_ip : 0;
     uint16_t prev_best_port = is_update ? ml->peers[idx].best_port : 0;
+    /* FIELD (2026-10-22): snapshot the OLD public key too — the field copy
+     * below overwrites p->public_key with the update's key, so a later
+     * comparison against p->public_key would ALWAYS be equal and a re-key
+     * could never be detected. */
+    uint8_t prev_public_key[32];
+    if (is_update) {
+        memcpy(prev_public_key, ml->peers[idx].public_key, 32);
+    } else {
+        memset(prev_public_key, 0, 32);
+    }
     if (is_update) {
         ESP_LOGI(TAG, "Updating existing peer %s (idx=%d)", update->hostname, idx);
     } else {
@@ -807,13 +829,40 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->last_send_ms = 0;
     p->last_upgrade_ms = 0;
     if (is_update) {
-        /* Preserve the live path state (see the note at the identity
-         * lookup): the WG slot and the direct endpoint must survive a map
-         * update, or the peer's traffic is orphaned / pushed onto DERP. */
-        p->wg_peer_index = prev_wg_peer_index;
-        p->has_direct_path = prev_has_direct;
-        p->best_ip = prev_best_ip;
-        p->best_port = prev_best_port;
+        /* FIELD (2026-10-22): a peer that keeps its VPN IP but arrives with
+         * a DIFFERENT public key is the SAME host with a ROTATED node key.
+         * The WireGuard device entry still holds the OLD key, and
+         * preserving it (the fix for 'an update must not tear down live
+         * state') keeps that OLD key in the device forever: our handshakes
+         * go out with a key the DERP relay no longer has a record for, and
+         * the relay drops them SILENTLY. The peer looks configured, the
+         * tunnel never forms, and the gateway receives nothing.
+         *
+         * So on a key CHANGE, drop the stale device entry and let the
+         * normal add path wire the NEW key in. On an update with the SAME
+         * key, the live state is preserved as before. */
+        bool key_changed = (memcmp(prev_public_key, update->public_key, 32) != 0);
+        if (key_changed) {
+            ESP_LOGW(TAG, "PEER RE-KEY: %s (%s) key changed, rewiring WG entry",
+                     p->hostname, p->vpn_ip);
+            if (ml->wg_netif && prev_wg_peer_index >= 0) {
+                wireguardif_remove_peer((struct netif *)ml->wg_netif,
+                                        (u8_t)prev_wg_peer_index);
+            }
+            p->wg_peer_index = -1;
+            p->has_direct_path = false;
+            p->best_ip = 0;
+            p->best_port = 0;
+        } else {
+            /* Preserve the live path state (see the note at the identity
+             * lookup): the WG slot and the direct endpoint must survive a
+             * map update, or the peer's traffic is orphaned / pushed onto
+             * DERP. */
+            p->wg_peer_index = prev_wg_peer_index;
+            p->has_direct_path = prev_has_direct;
+            p->best_ip = prev_best_ip;
+            p->best_port = prev_best_port;
+        }
     } else {
         p->has_direct_path = false;
         p->best_ip = 0;
@@ -874,22 +923,41 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         IP4_ADDR(&wg_peer.allowed_ip.u_addr.ip4, ip_a, ip_b, ip_c, ip_d);
         IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);
 
-        /* FIELD (2026-10-22): leave the endpoint BLANK. The endpoint from
-         * the coord map (or the NVS cache) is UNVALIDATED: the peer's NAT
-         * mapping rotates (observed on the studio router: 41641 -> 41643 ->
-         * 41644 -> 41646), so a cached address is routinely stale. In
-         * wireguardif, ANY non-zero endpoint means "direct UDP" -- so an
-         * unvalidated address sends every packet to a dead port where it is
-         * silently lost: no handshake, no DERP fallback, a black hole that
-         * still LOOKS reachable.
+        /* FIELD (2026-10-22): which endpoint is safe to install?
          *
-         * Only a DISCO-validated pong may install a direct path (see
-         * process_disco_pong) -- exactly Tailscale's semantics. Upstream
-         * microlink fixed this same class of bug (issue #18: "CGNAT peers
-         * got a one-way tunnel because an unvalidated advertised endpoint
-         * was installed at peer-add"). */
-        ip_addr_set_any(false, &wg_peer.endpoint_ip);
-        wg_peer.endport_port = 0;
+         * The NVS-cached one is NOT: it is frozen at save time, and a
+         * peer's NAT mapping rotates (observed on the studio router:
+         * 41641 -> 41643 -> 41644 -> 41646), so the cached address is
+         * routinely stale. In wireguardif ANY non-zero endpoint means
+         * "direct UDP", so a stale address sends every packet to a dead
+         * port where it is silently lost -- no handshake, no fallback, a
+         * black hole that still LOOKS reachable. That is exactly how the
+         * gateway peer died.
+         *
+         * The MAP's endpoint IS safe: the coord map refreshes it on every
+         * map update, and the map is the authority on where a peer can be
+         * reached (for the gateway it carries the LAN address the studio
+         * router NATs us onto -- 192.168.0.124:41641 -- which is the only
+         * working path: DERP cannot carry us, the two sides sit on
+         * different derpers, dfw vs hel).
+         *
+         * So: install the map's endpoint when the map provided one, and
+         * leave it BLANK when only the stale NVS copy exists. */
+        if (update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+            uint8_t ea = (update->endpoints[0].ip >> 24) & 0xFF;
+            uint8_t eb = (update->endpoints[0].ip >> 16) & 0xFF;
+            uint8_t ec = (update->endpoints[0].ip >> 8) & 0xFF;
+            uint8_t ed = update->endpoints[0].ip & 0xFF;
+            IP4_ADDR(&wg_peer.endpoint_ip.u_addr.ip4, ea, eb, ec, ed);
+            wg_peer.endport_port = update->endpoints[0].port;
+            ESP_LOGW(TAG, "WG peer %s: installed MAP endpoint %u.%u.%u.%u:%u",
+                     p->hostname, ea, eb, ec, ed, p->endpoints[0].port);
+        } else {
+            ip_addr_set_any(false, &wg_peer.endpoint_ip);
+            wg_peer.endport_port = 0;
+            ESP_LOGW(TAG, "WG peer %s: no fresh map endpoint, DERP-only for now",
+                     p->hostname);
+        }
 
         wg_peer.keep_alive = 25;
 
@@ -949,12 +1017,28 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * peer_lookup_by_allowed_ip scans in order, so traffic could be handed
      * to the stale one. Only apply endpoints if the update provides them
      * (the coord map often has none for a peer behind NAT). */
-    /* FIELD (2026-10-22): an UPDATE's endpoints are unvalidated too (the
-     * peer's NAT mapping rotates), so they must NOT be installed as a
-     * direct path -- only a DISCO-validated pong may set the endpoint.
-     * Installing them here is what black-holed the gateway peer: the board
-     * kept sending to a stale WAN port (41643 while the live mapping was
-     * 41644) and never fell back to DERP, so the tunnel never formed. */
+    /* FIELD (2026-10-22): install the MAP's endpoint on every update --
+     * the map is the authority and refreshes it continuously, so this is
+     * what keeps a rotated NAT port current (the gateway's mapping moved
+     * 41643 -> 41644 -> 41646 and the board kept using the stale one).
+     * The STALE copy is the NVS one, and the endpoint gate above keeps
+     * that out of the device. */
+    if (is_update && ml->wg_netif && p->wg_peer_index >= 0 &&
+        update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+        struct netif *netif = (struct netif *)ml->wg_netif;
+        ip_addr_t ep_ip;
+        IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(update->endpoints[0].ip));
+        wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+                                     &ep_ip, update->endpoints[0].port);
+        ESP_LOGW(TAG, "WG peer %s: refreshed MAP endpoint to %u.%u.%u.%u:%u",
+                 p->hostname,
+                 (unsigned)((update->endpoints[0].ip >> 24) & 0xFF),
+                 (unsigned)((update->endpoints[0].ip >> 16) & 0xFF),
+                 (unsigned)((update->endpoints[0].ip >> 8) & 0xFF),
+                 (unsigned)(update->endpoints[0].ip & 0xFF),
+                 update->endpoints[0].port);
+    }
 
     /* Persist to NVS for fast boot next time */
     ml_peer_nvs_save(p);
