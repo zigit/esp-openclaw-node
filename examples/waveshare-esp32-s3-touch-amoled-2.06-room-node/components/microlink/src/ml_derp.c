@@ -648,7 +648,18 @@ void ml_derp_tx_task(void *arg) {
         }
 
         /* Yield briefly */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* ADOPTION STEP 14 (the spin fix, field-proven 2026-10-21): a
+         * polling task's yield period is its CPU budget. This loop's tail
+         * delayed only 1ms -- at RAISED priority (11, the CPU fix for the
+         * call-time starvation) that is a 1000Hz spin which starves every
+         * task below it: the AFE/wakeword feeder (observed: 'Ringbuffer of
+         * AFE is empty' + 'Fail to read from AEC', wakeword dead) and
+         * taskLVGL (observed: the app UI stops responding). The working
+         * deployment build pairs prio 11 WITH a 10ms yield; the adoption
+         * had raised the priority on the unfixed spin. 10ms: same
+         * responsiveness for a relay that frames in tens of ms, 1/10th
+         * the wakeups. */
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     ESP_LOGI(TAG, "DERP I/O task exiting");
