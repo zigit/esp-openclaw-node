@@ -22,7 +22,10 @@
 static const char *TAG = "ml_peer_nvs";
 
 #define PEER_NVS_NAMESPACE  "ml_peers"
-#define PEER_NVS_BLOB_KEY   "tbl"
+/* FIELD (2026-10-22): bumped from "tbl" — the entry layout changed
+ * (hostname_short[7] -> hostname_label[32]). An old blob must be
+ * discarded, not parsed with the new layout. */
+#define PEER_NVS_BLOB_KEY   "tbl2"
 #ifdef CONFIG_ML_NVS_MAX_PEERS
 #define ML_NVS_MAX_PEERS    CONFIG_ML_NVS_MAX_PEERS
 #else
@@ -40,9 +43,21 @@ typedef struct __attribute__((packed)) {
         uint16_t port;              /* 2 bytes */
     } __attribute__((packed)) endpoints[2]; /* 12 bytes */
     uint8_t endpoint_count;         /* 1 byte */
-    char hostname_short[7];         /* 7 bytes (truncated) */
+    /* FIELD (2026-10-22): the peer's FIRST LABEL (the part before the
+     * first '.'), up to 31 chars + NUL — not a 6-char display truncation.
+     * The old 7-byte field stored "opencl" for
+     * "openclaws-virtual-machine-2.tailbdd5a.ts.net", so a peer restored
+     * from the NVS cache could never be matched by name: microlink_resolve()
+     * compares the query's first label against the peer's, and "opencl" !=
+     * "openclaws-virtual-machine-2". The name lookup therefore only worked
+     * while the live coord map was in memory, and died on every reboot.
+     * The first label is unique per tailnet host, and it is what the
+     * resolver compares — so it is the right thing to persist.
+     * A label longer than 31 chars is stored EMPTY (never a partial
+     * prefix): an unresolved name is safe, a wrong name is not. */
+    char hostname_label[32];        /* 32 bytes (first label, may be empty) */
     uint16_t lru_counter;           /* 2 bytes — higher = more recently used */
-} peer_nvs_entry_t;                 /* Total: 92 bytes */
+} peer_nvs_entry_t;
 
 /* In-memory table (loaded from NVS blob) */
 typedef struct __attribute__((packed)) {
@@ -134,8 +149,21 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
     }
     entry.endpoint_count = stored;
 
-    /* Truncated hostname for display */
-    strncpy(entry.hostname_short, peer->hostname, sizeof(entry.hostname_short) - 1);
+    /* Store the peer's FIRST LABEL (see the field comment): this is what
+     * microlink_resolve() matches on. */
+    {
+        size_t label_len = 0;
+        const char *dot = strchr(peer->hostname, '.');
+        label_len = dot ? (size_t)(dot - peer->hostname) : strlen(peer->hostname);
+        if (label_len < sizeof(entry.hostname_label)) {
+            memcpy(entry.hostname_label, peer->hostname, label_len);
+            entry.hostname_label[label_len] = '\0';
+        } else {
+            /* Too long to store exactly: store nothing rather than a
+             * prefix that could match a DIFFERENT peer. */
+            entry.hostname_label[0] = '\0';
+        }
+    }
 
     /* Find existing entry by VPN IP (update) or public key (re-keyed) */
     int slot = -1;
@@ -166,7 +194,7 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
             }
         }
         ESP_LOGI(TAG, "LRU evict: %s (slot=%d lru=%d)",
-                 s_table->entries[lru_idx].hostname_short, lru_idx, min_lru);
+                 s_table->entries[lru_idx].hostname_label, lru_idx, min_lru);
         s_table->entries[lru_idx] = entry;
         slot = lru_idx;
     }
@@ -174,7 +202,7 @@ esp_err_t ml_peer_nvs_save(const ml_peer_t *peer) {
     esp_err_t err = flush_table();
     if (err == ESP_OK) {
         ESP_LOGD(TAG, "Saved peer %s (slot=%d/%d)",
-                 entry.hostname_short, slot, s_table->count);
+                 entry.hostname_label, slot, s_table->count);
     }
 
     return err;
@@ -199,9 +227,9 @@ int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers) {
         p->active = true;
         p->wg_peer_index = -1;
 
-        /* Restore hostname (truncated, ensure null-terminated) */
-        memcpy(p->hostname, entry->hostname_short, sizeof(entry->hostname_short));
-        p->hostname[sizeof(entry->hostname_short)] = '\0';
+        /* Restore the stored first label as the peer's name. */
+        memcpy(p->hostname, entry->hostname_label, sizeof(entry->hostname_label));
+        p->hostname[sizeof(entry->hostname_label) - 1] = '\0';
 
         /* Restore endpoints */
         p->endpoint_count = entry->endpoint_count;

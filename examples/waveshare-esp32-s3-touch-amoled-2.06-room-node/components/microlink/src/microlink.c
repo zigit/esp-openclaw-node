@@ -714,29 +714,52 @@ static int strncasecmp_local(const char *a, const char *b, size_t len) {
     return 0;
 }
 
+/* FIELD (2026-10-22): compare by FIRST LABEL on both sides.
+ *
+ * The peer table holds two kinds of name: the full FQDN from the coord map
+ * ("openclaws-virtual-machine-2.tailbdd5a.ts.net") and the first label only
+ * ("openclaws-virtual-machine-2") for peers restored from the NVS cache
+ * (see ml_peer_nvs.c). The old code compared the query against the peer's
+ * first label only when the PEER had a dot in its name -- so a cached peer
+ * (no dot) could never be matched, and the query itself was never reduced
+ * to a label, so a full FQDN never matched a label-only peer.
+ *
+ * Reducing BOTH sides to their first label makes every combination work:
+ *   query FQDN     vs peer FQDN   -> label == label
+ *   query FQDN     vs peer label  -> label == label
+ *   query label    vs peer FQDN   -> label == label
+ *   query label    vs peer label  -> label == label
+ *
+ * First labels are unique per tailnet host, and an unresolvable name is
+ * safe while a wrong one is not -- so a peer whose stored label is empty
+ * (too long to persist) is simply not matched. */
+static bool ml_label_eq(const char *a, const char *b) {
+    while (*a && *a != '.' && *b && *b != '.') {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;   /* same ASCII lowering as
+        if (cb >= 'A' && cb <= 'Z') cb += 32;   * strncasecmp_local above */
+        if (ca != cb) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    /* both must end their label here (end of string or a dot) */
+    bool a_end = (*a == '\0' || *a == '.');
+    bool b_end = (*b == '\0' || *b == '.');
+    return a_end && b_end;
+}
+
 uint32_t microlink_resolve(const microlink_t *ml, const char *hostname) {
     if (!ml || !hostname || hostname[0] == '\0') return 0;
-
-    size_t query_len = strlen(hostname);
 
     for (int i = 0; i < ml->peer_count; i++) {
         const ml_peer_t *p = &ml->peers[i];
         if (!p->active || p->hostname[0] == '\0') continue;
 
-        /* 1. Exact match (case-insensitive) */
-        if (strncasecmp_local(p->hostname, hostname, sizeof(p->hostname)) == 0) {
+        /* Match on the first label of both the query and the peer name. */
+        if (ml_label_eq(p->hostname, hostname)) {
             return p->vpn_ip;
-        }
-
-        /* 2. Prefix match: query "npc1" matches peer "npc1.tail12345.ts.net"
-         * The query must match up to the first '.' in the peer hostname. */
-        const char *dot = strchr(p->hostname, '.');
-        if (dot) {
-            size_t short_len = (size_t)(dot - p->hostname);
-            if (query_len == short_len &&
-                strncasecmp_local(p->hostname, hostname, short_len) == 0) {
-                return p->vpn_ip;
-            }
         }
     }
 
