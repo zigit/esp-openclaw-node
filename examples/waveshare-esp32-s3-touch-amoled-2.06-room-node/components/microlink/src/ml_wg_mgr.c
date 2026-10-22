@@ -450,6 +450,16 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     bool prev_has_direct = is_update ? ml->peers[idx].has_direct_path : false;
     uint32_t prev_best_ip = is_update ? ml->peers[idx].best_ip : 0;
     uint16_t prev_best_port = is_update ? ml->peers[idx].best_port : 0;
+    /* ADOPTION STEP 7 (re-key): snapshot the OLD public key too -- the
+     * field copy below overwrites p->public_key with the update's key, so a
+     * later comparison against p->public_key would ALWAYS be equal and a
+     * key rotation could never be detected. */
+    uint8_t prev_public_key[32];
+    if (is_update) {
+        memcpy(prev_public_key, ml->peers[idx].public_key, 32);
+    } else {
+        memset(prev_public_key, 0, 32);
+    }
 
     ml_peer_t *p = &ml->peers[idx];
     p->vpn_ip = update->vpn_ip;
@@ -485,13 +495,34 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     p->last_upgrade_ms = 0;
 
     if (is_update) {
-        /* Restore the live state snapshotted above: the WG slot, the
-         * DISCO-validated direct path and its endpoint must survive a
-         * coord-map update. */
-        p->wg_peer_index = prev_wg_peer_index;
-        p->has_direct_path = prev_has_direct;
-        p->best_ip = prev_best_ip;
-        p->best_port = prev_best_port;
+        /* ADOPTION STEP 7 (re-key): a peer that keeps its VPN IP but arrives
+         * with a DIFFERENT public key is the SAME host with a ROTATED node
+         * key. The WG device entry still holds the OLD key, and preserving
+         * it keeps that OLD key in the device forever: handshakes go out
+         * with a key the DERP relay no longer has a record for, and the
+         * relay drops them SILENTLY. On a key change, drop the stale device
+         * entry and let the normal add path wire the NEW key in. */
+        bool key_changed = (memcmp(prev_public_key, update->public_key, 32) != 0);
+        if (key_changed) {
+            ESP_LOGW(TAG, "PEER RE-KEY: %s public key changed, rewiring WG entry",
+                     p->hostname);
+            if (ml->wg_netif && prev_wg_peer_index >= 0) {
+                wireguardif_remove_peer((struct netif *)ml->wg_netif,
+                                        (u8_t)prev_wg_peer_index);
+            }
+            p->wg_peer_index = -1;
+            p->has_direct_path = false;
+            p->best_ip = 0;
+            p->best_port = 0;
+        } else {
+            /* Same key: restore the live state snapshotted above -- the WG
+             * slot, the DISCO-validated direct path and its endpoint must
+             * survive a coord-map update. */
+            p->wg_peer_index = prev_wg_peer_index;
+            p->has_direct_path = prev_has_direct;
+            p->best_ip = prev_best_ip;
+            p->best_port = prev_best_port;
+        }
     } else {
         p->has_direct_path = false;
         p->best_ip = 0;
@@ -543,17 +574,33 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         IP4_ADDR(&wg_peer.allowed_ip.u_addr.ip4, ip_a, ip_b, ip_c, ip_d);
         IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);
 
-        /* Set endpoint if available, otherwise leave blank for DERP-only */
-        if (p->endpoint_count > 0 && p->endpoints[0].ip != 0) {
-            uint8_t ea = (p->endpoints[0].ip >> 24) & 0xFF;
-            uint8_t eb = (p->endpoints[0].ip >> 16) & 0xFF;
-            uint8_t ec = (p->endpoints[0].ip >> 8) & 0xFF;
-            uint8_t ed = p->endpoints[0].ip & 0xFF;
+        /* ADOPTION STEP 7 (endpoint policy): which endpoint is safe to install?
+         *
+         * The NVS-cached one is NOT: it is frozen at save time, and a peer's
+         * NAT mapping rotates (observed on the studio router: 41641 -> 41643
+         * -> 41644 -> 41646), so the cached address is routinely stale. In
+         * wireguardif ANY non-zero endpoint means "direct UDP", so a stale
+         * address sends every packet to a dead port where it is silently
+         * lost -- no handshake, no fallback, a black hole that still LOOKS
+         * reachable. That is exactly how the gateway peer died.
+         *
+         * The MAP's endpoint IS safe: the coord map refreshes it on every
+         * map update and it is the authority on where a peer can be
+         * reached. Install it when the map provides one; blank otherwise. */
+        if (update->endpoint_count > 0 && update->endpoints[0].ip != 0) {
+            uint8_t ea = (update->endpoints[0].ip >> 24) & 0xFF;
+            uint8_t eb = (update->endpoints[0].ip >> 16) & 0xFF;
+            uint8_t ec = (update->endpoints[0].ip >> 8) & 0xFF;
+            uint8_t ed = update->endpoints[0].ip & 0xFF;
             IP4_ADDR(&wg_peer.endpoint_ip.u_addr.ip4, ea, eb, ec, ed);
-            wg_peer.endport_port = p->endpoints[0].port;
+            wg_peer.endport_port = update->endpoints[0].port;
+            ESP_LOGW(TAG, "WG peer %s: installed MAP endpoint %u.%u.%u.%u:%u",
+                     p->hostname, ea, eb, ec, ed, update->endpoints[0].port);
         } else {
             ip_addr_set_any(false, &wg_peer.endpoint_ip);
             wg_peer.endport_port = 0;
+            ESP_LOGW(TAG, "WG peer %s: no map endpoint, DERP-only for now",
+                     p->hostname);
         }
 
         wg_peer.keep_alive = 25;
@@ -582,11 +629,42 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
              * to idle peers get silently dropped (peer has no WG entry for us).
              * Instead, we wait for the peer to initiate when they need to reach us.
              * The WG session is established on-demand, matching Tailscale's model. */
-            ESP_LOGI(TAG, "WG peer ready (passive), waiting for peer-initiated handshake");
+            /* ADOPTION STEP 7 (priority DERP session): the priority peer
+             * (the gateway) must ALWAYS have a route. With no endpoint
+             * installed, a peer needs a DERP session to have any route at
+             * all -- and stock only establishes one on the DISCO-pong path
+             * or trust expiry. A priority peer that never got a pong would
+             * be permanently unreachable, and the control websocket (which
+             * rides the tunnel to the gateway) could never connect. */
+            if (ml->config.priority_peer_ip != 0 &&
+                p->vpn_ip == ml->config.priority_peer_ip) {
+                wireguardif_connect_derp(netif, (u8_t)p->wg_peer_index);
+                ESP_LOGI(TAG, "WG peer ready (priority): DERP session established");
+            } else {
+                ESP_LOGI(TAG, "WG peer ready (passive), waiting for peer-initiated handshake");
+            }
         } else {
             ESP_LOGW(TAG, "wireguardif_add_peer failed: %d", wg_err);
             p->wg_peer_index = -1;
         }
+    }
+
+    /* ADOPTION STEP 7 (update refresh): install the MAP's endpoint on every
+     * update -- the map is the authority and refreshes it continuously, so
+     * this keeps a rotated NAT port current (the gateway's mapping moved
+     * 41643 -> 41644 -> 41646 while the board kept using the stale one).
+     * Skip when a DISCO-validated path exists: a validated path beats any
+     * advertised one, and overwriting it would throw away a working direct
+     * path. */
+    if (is_update && ml->wg_netif && p->wg_peer_index >= 0 &&
+        update->endpoint_count > 0 && update->endpoints[0].ip != 0 &&
+        !(p->has_direct_path && p->best_ip != 0)) {
+        struct netif *netif = (struct netif *)ml->wg_netif;
+        ip_addr_t ep_ip;
+        IP_SET_TYPE_VAL(ep_ip, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&ep_ip), htonl(update->endpoints[0].ip));
+        wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+                                     &ep_ip, update->endpoints[0].port);
     }
 
     /* Persist to NVS for fast boot next time */
@@ -1475,6 +1553,20 @@ static void disco_periodic_probes(microlink_t *ml) {
         /* Check if direct path trust has expired (always runs, not throttled) */
         if (p->has_direct_path && now > p->trust_until_ms) {
             ESP_LOGI(TAG, "Direct path to %s expired, reverting to DERP", p->hostname);
+            /* ADOPTION STEP 7: CLEAR the endpoint in the wireguard device as
+             * well. Clearing has_direct_path alone is not enough: the stale
+             * address stays wired in, and wireguardif keeps treating the
+             * peer as "direct" -- so every packet still goes to the dead
+             * port (silently lost, no DERP fallback) and the peer looks
+             * reachable while being a black hole. */
+            if (ml->wg_netif && p->wg_peer_index >= 0) {
+                struct netif *netif = (struct netif *)ml->wg_netif;
+                ip_addr_t any_ep;
+                IP_SET_TYPE_VAL(any_ep, IPADDR_TYPE_V4);
+                ip_addr_set_any(false, &any_ep);
+                wireguardif_update_endpoint(netif, (u8_t)p->wg_peer_index,
+                                            &any_ep, 0);
+            }
             p->has_direct_path = false;
 
             /* Only do DERP fallback + re-probe for allowed peers.
