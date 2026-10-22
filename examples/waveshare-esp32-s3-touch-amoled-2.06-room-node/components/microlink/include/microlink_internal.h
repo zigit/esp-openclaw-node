@@ -44,11 +44,27 @@ extern "C" {
 
 /* Task configuration */
 #define ML_TASK_NET_IO_STACK    (8 * 1024)
-#define ML_TASK_NET_IO_PRIO     7
+/* ADOPTION STEP 4 (THE CPU FIX, field-proven 2026-10-22): on a device
+ * that also runs an audio DSP pipeline, the media tasks (prio 10-15)
+ * starve these four tasks at 7/5/5/7 COMPLETELY. Measured on a live
+ * call: the tunnel ping died the instant the call started while TURN
+ * audio kept flowing; STUN probes went unanswered (3 retries -> fail);
+ * DERP writes stalled past the relay server's 2s write deadline -> RST
+ * -> the media peer's keepalives stopped -> every call killed ~44s in.
+ * Idle was always clean (the DSP does not run).
+ *
+ * Raise all four to 11: ABOVE the media hogs (10), LEVEL with the
+ * TLS/websocket client tasks (11 -- time-sliced round-robin, both make
+ * progress), BELOW the audio-realtime floor (15) and radio (23).
+ *
+ * CAUTION (A/B'd on the board): 12 is WRONG -- it preempts the TLS
+ * handshake tasks entirely (50 consecutive connect timeouts, the node
+ * never reaches 'session ready'). The ladder, not the leap. */
+#define ML_TASK_NET_IO_PRIO     11
 #define ML_TASK_NET_IO_CORE     0
 
 #define ML_TASK_DERP_TX_STACK   (14 * 1024)
-#define ML_TASK_DERP_TX_PRIO    5
+#define ML_TASK_DERP_TX_PRIO    11
 #define ML_TASK_DERP_TX_CORE    0
 
 /* ADOPTION STEP 3 (field-measured on the Waveshare AMOLED board): the
@@ -60,11 +76,11 @@ extern "C" {
  * tight for the NVS flash-ops residency; 9K verified), wg_mgr HWM
  * 5096 -> ship 6K (18% margin, verified on the flashed build). */
 #define ML_TASK_COORD_STACK     (9 * 1024)
-#define ML_TASK_COORD_PRIO      5
+#define ML_TASK_COORD_PRIO      11
 #define ML_TASK_COORD_CORE      1
 
 #define ML_TASK_WG_MGR_STACK    (6 * 1024)
-#define ML_TASK_WG_MGR_PRIO     7
+#define ML_TASK_WG_MGR_PRIO     11
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */
