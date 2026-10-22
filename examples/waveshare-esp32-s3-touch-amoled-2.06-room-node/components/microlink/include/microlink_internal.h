@@ -65,7 +65,13 @@ extern "C" {
  * RST (-0x0050) -> the media peer's binding keepalives stopped -> the
  * gateway's 30s timeout killed every call ~44s in. Idle was always clean
  * because the DSP tasks do not run.
- * Raise all four to 12: ABOVE the media/GMF tasks (aud_src/aenc/buffer_in
+ * FIELD 2026-10-22 (regression, flashed at 09:45): prio 12 broke the
+ * control websocket - the esp_openclaw_node TLS handshake tasks run at
+ * prio 11, and the four at 12 preempted the handshake into 50 consecutive
+ * ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT with no 'operator Talk session ready'.
+ * Prio 11 instead: still ABOVE the media hogs (time-sliced WITH the
+ * node tasks - both make progress), BELOW the realtime floor.
+ * Raise all four to 11: ABOVE the media/GMF tasks (aud_src/aenc/buffer_in
  * =10, esp_openclaw_no=11) so a starved network stack cannot happen again,
  * BELOW the system-critical layers (AUD_SRC/websocket=15, tiT=18,
  * esp_timer=22, wifi/ml_udp_rx=23, ipc=24). They are event-driven (queue/
@@ -74,11 +80,11 @@ extern "C" {
  * was the 1ms-spin defect, since fixed (yield 10ms, see ml_derp.c). 12 is
  * three levels under the audio-realtime floor and keeps I2S capture (15)
  * untouched. */
-#define ML_TASK_NET_IO_PRIO     12
+#define ML_TASK_NET_IO_PRIO     11
 #define ML_TASK_NET_IO_CORE     0
 
 #define ML_TASK_DERP_TX_STACK   (14 * 1024)
-#define ML_TASK_DERP_TX_PRIO    12
+#define ML_TASK_DERP_TX_PRIO    11
 #define ML_TASK_DERP_TX_CORE    0
 
 	/* FIELD 2026-10-21: shrink sized from measured HWM (watch list, heartbeatalive):
@@ -86,7 +92,7 @@ extern "C" {
 	 * flash ops) so residency stays, but the freed 3KB slab at boot was starving
 	 * the operator client create (ESP_ERR_NO_MEM when largest < 8KB). */
 #define ML_TASK_COORD_STACK     (9 * 1024)
-#define ML_TASK_COORD_PRIO      12
+#define ML_TASK_COORD_PRIO      11
 #define ML_TASK_COORD_CORE      1
 
 	/* FIELD 2026-10-21: shrink sized from measured HWM 5096 -> ship 6KB (18%% margin,
@@ -94,7 +100,7 @@ extern "C" {
 	 * this 1KB plus the peer_update queue relief is what lets the lane spawn after
 	 * the operator client is primed at boot. */
 #define ML_TASK_WG_MGR_STACK    (6 * 1024)
-#define ML_TASK_WG_MGR_PRIO     12
+#define ML_TASK_WG_MGR_PRIO     11
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */
