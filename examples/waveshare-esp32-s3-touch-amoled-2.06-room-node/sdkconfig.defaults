@@ -99,3 +99,24 @@ CONFIG_MBEDTLS_CHACHA20_C=y
 CONFIG_MBEDTLS_POLY1305_C=y
 CONFIG_MBEDTLS_CHACHAPOLY_C=y
 # NOTE: CONFIG_TS_AUTH_KEY belongs ONLY in the git-ignored sdkconfig.credentials overlay.
+
+# --- lwIP netconn external-resolve hook (MagicDNS over the WG lane) ---
+# The tailscale_manager component implements lwip_hook_netconn_external_resolve()
+# (components/tailscale_manager/src/room_dns_hook.c) so the gateway's *.ts.net
+# name resolves from the coord-map peer table with ZERO real-network DNS.
+#
+# FIELD 2026-10-22 (regression, self-inflicted): the hook is OFF unless this
+# symbol is set. It lived ONLY in the generated sdkconfig — never in
+# sdkconfig.defaults — so `rm -f sdkconfig && idf.py build` (the standard
+# 'force a reconfigure' move) silently reset it to
+# CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_NONE. The hook symbol then vanished
+# from the ELF, MagicDNS stopped resolving, the control websocket could not
+# connect (ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME every 9s), the coord map
+# never arrived, and the gateway peer never got a WG slot. The board looked
+# 'flashed fine' (banner, Wi-Fi, DERP, phone peer all healthy) but the gateway
+# was simply absent.
+#
+# It MUST be pinned here, in the tracked defaults, so it survives every
+# reconfigure. The lwIP Kconfig choice defaults to _NONE, so a fresh checkout
+# loses it without this line.
+CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM=y
