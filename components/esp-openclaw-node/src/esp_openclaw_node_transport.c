@@ -6,6 +6,7 @@
 
 #include "esp_openclaw_node_internal.h"
 #include "esp_openclaw_node_transport_diag.h"
+#include "esp_openclaw_node_lwip_diag.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -173,10 +174,22 @@ esp_err_t esp_openclaw_node_start_transport_for_active_source(
         .network_timeout_ms = 10000,
         .ping_interval_sec = ESP_OPENCLAW_NODE_WS_PING_INTERVAL_SEC,
         .pingpong_timeout_sec = ESP_OPENCLAW_NODE_WS_PINGPONG_TIMEOUT_SEC,
+        /* FIELD 2026-10-21 (2nd pass): the keepalive floor must sit ABOVE the
+         * app-level PONG timeout, or it preempts the smarter watchdog. The
+         * floor is keep_idle + keep_cnt*keep_intvl (lwIP tcp.c:1346) = the
+         * value at which lwIP purges the PCB locally (ERR_ABRT = errno 113
+         * 'Software caused connection abort' -> the peer logs code=1006 ->
+         * the voice session dies). With 10/5/3 the floor was 25s and the
+         * measured teardown was 33.5s — the keepalive killed every call
+         * under a ~35s floor. The control socket goes quiet during a call
+         * (the agent turn lives gateway-side), so the floor must tolerate a
+         * full reply; the application-level PING/PONG (90s, and now it
+         * drains the socket before judging) is the watchdog that should
+         * act first. 30/10/6 -> 90s floor, above the 90s PONG timeout. */
         .keep_alive_enable = true,
-        .keep_alive_idle = 5,
-        .keep_alive_interval = 5,
-        .keep_alive_count = 3,
+        .keep_alive_idle = 30,
+        .keep_alive_interval = 10,
+        .keep_alive_count = 6,
         .task_prio = ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY,
         .task_stack = ESP_OPENCLAW_NODE_TRANSPORT_TASK_STACK_SIZE,
         .buffer_size = ESP_OPENCLAW_NODE_TRANSPORT_BUFFER_SIZE,
@@ -339,19 +352,30 @@ static void websocket_event_handler(
     }
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED: {
+        esp_err_t disconnect_local_err = local_err_from_ws_event(data);
+        /* Fault snapshot: name the exhausted lwIP resource at the moment
+         * of death (2026-10-21 dual-abort diagnosis). Fires only when the
+         * event carries a captured failure; clean closes stay quiet. */
+        if (disconnect_local_err != ESP_OK) {
+            esp_openclaw_node_lwip_diag_dump("ws disconnected");
+        }
         esp_openclaw_node_work_message_t message = {
             .type = ESP_OPENCLAW_NODE_WORK_MSG_WS_DISCONNECTED,
             .transport_id = transport_ctx->transport_id,
-            .local_err = local_err_from_ws_event(data),
+            .local_err = disconnect_local_err,
         };
         esp_openclaw_node_enqueue_work_message_from_callback(node, &message);
         break;
     }
     case WEBSOCKET_EVENT_ERROR: {
+        esp_err_t error_local_err = local_err_from_ws_event(data);
+        if (error_local_err != ESP_OK) {
+            esp_openclaw_node_lwip_diag_dump("ws error");
+        }
         esp_openclaw_node_work_message_t message = {
             .type = ESP_OPENCLAW_NODE_WORK_MSG_WS_ERROR,
             .transport_id = transport_ctx->transport_id,
-            .local_err = local_err_from_ws_event(data),
+            .local_err = error_local_err,
         };
         esp_openclaw_node_enqueue_work_message_from_callback(node, &message);
         break;

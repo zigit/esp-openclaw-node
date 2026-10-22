@@ -15,6 +15,7 @@ idf_component_register(
         "room_diagnostics_data.c"
         "room_diagnostics_metrics.c"
         "room_face.c"
+        "room_heap_census.c"
         "room_file_validation.c"
         "room_files.c"
         "room_media.c"

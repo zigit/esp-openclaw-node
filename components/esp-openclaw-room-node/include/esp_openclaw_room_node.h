@@ -48,6 +48,13 @@ typedef struct {
     void *ctx;
     /* Append optional policy so existing positional board initializers retain their meaning. */
     float playback_gain_db; /**< Post-decode PCM16 boost, 0..12 dB; 0 preserves samples exactly. */
+    /* FIELD 2026-10-21 (Fredrik): force half-duplex capture (mute the mic
+     * while the speaker plays + a 300 ms tail) even when afe_layout claims
+     * a reference channel. Set it when the board has no real speaker
+     * reference: the speaker's own voice would otherwise reach the
+     * uplink, the gateway would interrupt itself, and the voice session
+     * would tear down mid-reply. */
+    bool force_half_duplex_capture;
 } esp_openclaw_room_audio_port_t;
 
 typedef struct {

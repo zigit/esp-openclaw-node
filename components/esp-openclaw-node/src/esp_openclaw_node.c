@@ -432,6 +432,8 @@ esp_err_t esp_openclaw_node_create(
         node->config.role,
         &node->persisted_session);
     if (err != ESP_OK) {
+        ESP_LOGE("esp_openclaw_node", "create: persisted_session_load failed: %s",
+                 esp_err_to_name(err));
         esp_openclaw_node_identity_free(&node->identity);
         esp_openclaw_node_free_config_strings(&node->config);
         vQueueDelete(node->work_queue);
@@ -456,6 +458,8 @@ esp_err_t esp_openclaw_node_create(
         ESP_OPENCLAW_NODE_TASK_PRIORITY,
         &node->task_handle);
     if (task_ok != pdPASS) {
+        ESP_LOGE("esp_openclaw_node", "create: worker task spawn failed (stack=%d)",
+                 ESP_OPENCLAW_NODE_TASK_STACK_SIZE);
         esp_openclaw_node_persisted_session_free(&node->persisted_session);
         esp_openclaw_node_identity_free(&node->identity);
         esp_openclaw_node_free_config_strings(&node->config);

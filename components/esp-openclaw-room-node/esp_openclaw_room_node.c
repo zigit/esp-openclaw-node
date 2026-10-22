@@ -10,6 +10,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "room_heap_census.h"
 #include "esp_netif.h"
 #include "esp_rom_sys.h"
 #include "esp_openclaw_node.h"
@@ -23,6 +24,7 @@
 #include "esp_webrtc.h"
 #include "esp_capture.h"
 #include "freertos/idf_additions.h"
+#include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
@@ -108,6 +110,84 @@ static void talk_audio_snapshot(uint32_t generation, const char *stage)
         generation, stage, audio.capture_read_successes, audio.capture_read_errors,
         audio.feed_successes, audio.feed_errors, audio.fetch_successes, audio.fetch_errors,
         audio.renderer_accepted, audio.renderer_errors);
+}
+
+/* FIELD 2026-10-22: in-call snapshot tick. Runs in the esp_timer task:
+ * only reads atomic counters + ESP_LOGI, no locks taken here. */
+static void talk_snap_tick(void *arg)
+{
+    talk_audio_snapshot((uint32_t)(uintptr_t)arg, "tick");
+    /* FIELD 2026-10-22: radio state at the cut second. The mid-call WAN
+     * break (STUN fail + DERP RST) survived BOTH the DNS fix (7df7dd1) and
+     * the peer-churn fix (4858227) — the call still dies ~40-50s in with no
+     * local wifi event logged. The one variable never yet observed is the
+     * wifi link itself at the moment of the break. RSSI every 5s during
+     * calls: if it craters at the cut second it's the radio/AP; if it stays
+     * steady the break is upstream (AP/router/ISP). */
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        ESP_LOGI(TAG, "room_talk_wifi rssi=%d chan=%d", ap.rssi, ap.primary);
+    } else {
+        ESP_LOGW(TAG, "room_talk_wifi: sta_get_ap_info FAILED — link down?");
+    }
+
+    /* FIELD 2026-10-22 (Fredrik's ping finding): a ping from the gateway to
+     * the board's tailscale IP stops the moment a call starts, while TURN
+     * audio keeps flowing — the WG-tunnel path (net_io → wg_mgr → tcpip)
+     * goes dark while the webrtc tasks keep running. Not the radio; almost
+     * certainly CPU starvation of the microlink network tasks by the call's
+     * DSP pipeline. This names the eater: top-3 tasks by CPU share each 5s
+     * window (runtime-stats counters diffed against the previous tick). */
+    {
+#define CPU_SNAP_MAX 48
+        static TaskStatus_t snap[CPU_SNAP_MAX];
+        static TaskStatus_t prev[CPU_SNAP_MAX];
+        static UBaseType_t prev_n = 0;
+        static uint32_t prev_total = 0;
+        uint32_t total_now = 0;
+        UBaseType_t n = uxTaskGetSystemState(snap, CPU_SNAP_MAX, &total_now);
+        if (n > 0 && prev_n > 0 && total_now > prev_total) {
+            uint32_t dtotal = total_now - prev_total;
+            /* top-3 by runtime delta across the window */
+            UBaseType_t top_i[3] = {0, 0, 0};
+            uint32_t top_d[3] = {0, 0, 0};
+            for (UBaseType_t i = 0; i < n; i++) {
+                uint32_t d = 0;
+                for (UBaseType_t j = 0; j < prev_n; j++) {
+                    if (prev[j].xHandle == snap[i].xHandle) {
+                        uint32_t c_now = snap[i].ulRunTimeCounter;
+                        uint32_t c_prev = prev[j].ulRunTimeCounter;
+                        if (c_now > c_prev) d = c_now - c_prev;
+                        break;
+                    }
+                }
+                if (d > top_d[0]) {
+                    top_d[2] = top_d[1]; top_i[2] = top_i[1];
+                    top_d[1] = top_d[0]; top_i[1] = top_i[0];
+                    top_d[0] = d; top_i[0] = i;
+                } else if (d > top_d[1]) {
+                    top_d[2] = top_d[1]; top_i[2] = top_i[1];
+                    top_d[1] = d; top_i[1] = i;
+                } else if (d > top_d[2]) {
+                    top_d[2] = d; top_i[2] = i;
+                }
+            }
+            if (dtotal > 0) {
+                ESP_LOGI(TAG, "room_talk_cpu %s=%u%% %s=%u%% %s=%u%%",
+                         snap[top_i[0]].pcTaskName,
+                         (unsigned)(top_d[0] * 100 / dtotal),
+                         snap[top_i[1]].pcTaskName,
+                         (unsigned)(top_d[1] * 100 / dtotal),
+                         snap[top_i[2]].pcTaskName,
+                         (unsigned)(top_d[2] * 100 / dtotal));
+            }
+        }
+        if (n > 0) {
+            memcpy(prev, snap, sizeof(TaskStatus_t) * n);
+            prev_n = n;
+            prev_total = total_now;
+        }
+    }
 }
 
 static void refresh_home_facts(void)
@@ -205,6 +285,10 @@ static void start_talk_once(void);
 static bool admit_talk_locked(void);
 static esp_err_t register_talk_node_commands(esp_openclaw_node_handle_t node);
 static TaskHandle_t talk_start_worker;
+/* In-call heap decay monitor (diagnostic 2026-10-21): 5s census one-liner via
+ * esp_timer — no new task. Callback does heap reads only, timer-safe. */
+static esp_timer_handle_t talk_heap_timer;
+static void talk_heap_tick_cb(void *arg) { (void)arg; room_heap_census_tick(); }
 /* Timer and queued operator work are guarded by state_lock. The existing
  * internal-stack supervisor also performs NVS-backed operator startup. */
 static esp_timer_handle_t operator_start_timer;
@@ -417,6 +501,7 @@ static void talk_teardown_task(void *arg)
          * is finished. Pending RPC refs may survive, but cannot dispatch. */
         talk_stage(generation, "stop_request", "consumed", 0);
         talk_audio_snapshot(generation, "teardown");
+        room_heap_census_log("teardown_begin");
         talk_stage(generation, "quiesce", "begin", 0);
         esp_openclaw_talk_call_quiesce(call);
         talk_stage(generation, "quiesce", "end", 0);
@@ -429,6 +514,7 @@ static void talk_teardown_task(void *arg)
             talk_stage(generation, "sdk_close", "begin", 0);
             int result = esp_webrtc_close(session);
             talk_stage(generation, "sdk_close", "end", result);
+            room_heap_census_log("sdk_close_end");
         }
         if (talk_ambient_suspended) {
             talk_stage(generation, "ambient_restore", "begin", 0);
@@ -457,6 +543,10 @@ static void talk_teardown_task(void *arg)
         talk_closing = false;
         xSemaphoreGive(state_lock);
         esp_openclaw_talk_call_release(call);
+        room_heap_census_log("teardown_end");
+        if (talk_heap_timer != NULL) {
+            esp_timer_stop(talk_heap_timer);
+        }
         refresh_home_facts();
         start_node_if_pending();
         start_operator_if_pending();
@@ -507,6 +597,32 @@ static int webrtc_event(esp_webrtc_event_t *event, void *ctx)
             (int)event->type);
         if (current) talk_audio_snapshot(generation, stage);
     }
+    /* FIELD 2026-10-22: periodic audio snapshot DURING the call, every 5s.
+     * The 00:51 call proved why: the only in-call counters were at
+     * peer_connected (t=69s, render_ok=0) and teardown (t=137s,
+     * render_ok=1814) — two points from which we could only COMPUTE the cut
+     * moment (69.2 + 1814/50 = 105.5s, matching the DERP RST at 105.977s
+     * within 500ms). With 5s snapshots the cut second is directly visible,
+     * and whether capture kept flowing while render stopped tells us which
+     * direction died first. */
+    {
+        static esp_timer_handle_t snap_timer = NULL;
+        if (current && stage && strcmp(stage, "peer_connected") == 0) {
+            if (snap_timer == NULL) {
+                const esp_timer_create_args_t args = {
+                    .callback = talk_snap_tick,
+                    .arg = (void *)(uintptr_t)generation,
+                    .name = "talk_snap",
+                };
+                esp_timer_create(&args, &snap_timer);
+            }
+            esp_timer_stop(snap_timer); /* restart cleanly on re-connect */
+            esp_timer_start_periodic(snap_timer, 5000000);
+        } else if (stage && (strcmp(stage, "peer_disconnected") == 0 ||
+                             strcmp(stage, "peer_failed") == 0)) {
+            if (snap_timer) esp_timer_stop(snap_timer);
+        }
+    }
     return 0;
 }
 
@@ -515,6 +631,22 @@ static bool admit_talk_locked(void)
 {
     if (!operator_ready || operator_client == NULL || gateway_http_base == NULL ||
         camera_active || talk_call != NULL || talk_generation == UINT32_MAX) return false;
+#if CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK > 0
+    /* Death-certificate guard (2026-10-21 11:31): the talk-mode audio
+     * pipeline reopen carves ~14KB internal AFTER transports are
+     * established; below this floor a call goes zombie or aborts both
+     * transports ~19s in. Refuse early: clean error face, no zombie. */
+    size_t largest = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (largest < CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK) {
+        ESP_LOGW(TAG, "talk refused: internal largest=%u < floor=%d "
+                 "(fragmented heap; reboot the board to restore)",
+                 (unsigned)largest,
+                 CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK);
+        room_heap_census_log("talk_refused_guard");
+        return false;
+    }
+#endif
     uint32_t generation = talk_generation + 1;
     esp_openclaw_talk_signaling_config_t signaling = {
         .operator_node = operator_client,
@@ -558,18 +690,51 @@ static void start_talk_once(void)
     xSemaphoreGive(state_lock);
     if (!admitted) return;
     talk_stage(generation, "startup", "begin", 0);
+    room_heap_census_log("talk_open_begin");
+    /* In-call decay monitor: 5s one-liner without a new task (esp_timer;
+     * callback does heap reads only). Stopped at teardown_end. */
+    if (talk_heap_timer == NULL) {
+        const esp_timer_create_args_t tick_args = {
+            .callback = talk_heap_tick_cb,
+            .name = "talk_heap_tick",
+        };
+        if (esp_timer_create(&tick_args, &talk_heap_timer) != ESP_OK) {
+            talk_heap_timer = NULL;
+        }
+    }
+    if (talk_heap_timer != NULL) {
+        esp_timer_stop(talk_heap_timer);  /* no-op safe if not running */
+        esp_timer_start_periodic(talk_heap_timer, 5000000);
+    }
     if (cancelled) goto done;
     talk_stage(generation, "media_acquire", "begin", 0);
     room_media_begin_talk();
     talk_stage(generation, "media_acquire", "end", 0);
     talk_audio_snapshot(generation, "acquired");
+    room_heap_census_log("talk_media_acquired");
     xSemaphoreTake(state_lock, portMAX_DELAY);
     talk_media_owned = true;
     cancelled = talk_cancel_requested;
     xSemaphoreGive(state_lock);
     if (cancelled) goto done;
 
-    esp_peer_default_cfg_t peer = {.agent_recv_timeout = 500, .ice_use_lite_mode = true};
+    /* FIELD 2026-10-21: the MEDIA peer has its own keepalive — STUN binding
+     * requests every 6s, and after alive_binding_retries unanswered attempts
+     * the peer is declared disconnected (default 5 => 30s). Field log:
+     *   'Peer keepalive check fail count 2/3/4' then
+     *   'Peer not response for binding after 30000' -> 'Peer disconnected'
+     * at ~30s into EVERY call — the media peer, not the control socket, was
+     * the killer (the control socket now survives past it). The binding
+     * requests ride the same WG tunnel whose STUN failures correlate with
+     * every abort (6/6 aborting boots, 0/6 healthy), so a 30s tolerance is
+     * too tight for that path. 15 attempts = 90s, matching the control
+     * socket's keepalive floor so both watchdogs act on the same timescale.
+     * 0xFF would disable the check entirely — keep it, just tolerant. */
+    esp_peer_default_cfg_t peer = {
+        .agent_recv_timeout = 500,
+        .ice_use_lite_mode = true,
+        .alive_binding_retries = 15,
+    };
     esp_webrtc_cfg_t config = {
         .peer_cfg = {
             .audio_info = {.codec = ESP_PEER_AUDIO_CODEC_OPUS, .sample_rate = 16000, .channel = 1},
@@ -683,6 +848,14 @@ static void operator_gateway_event(
     }
 }
 
+/* FIELD 2026-10-21 (Fredrik): the gateway's name -> IP answer can go stale
+ * (the gateway's VPN IP changes, or the cached answer dies with it). The
+ * board layer that owns the tailnet implements this weak hook to drop the
+ * answer so the next resolve re-reads the peer table. Default: no-op. */
+__attribute__((weak)) void esp_openclaw_room_note_gateway_unreachable(void)
+{
+}
+
 static void operator_event(
     esp_openclaw_node_handle_t client,
     esp_openclaw_node_event_t event,
@@ -719,6 +892,12 @@ static void operator_event(
     if (ready) {
         ESP_LOGI(TAG, "operator Talk session ready");
     } else {
+        if (event == ESP_OPENCLAW_NODE_EVENT_CONNECT_FAILED) {
+            /* The cached gateway answer may be the reason: drop it so the
+             * next resolve re-reads the peer table (a changed gateway IP
+             * is then adopted instead of dialling a dead address). */
+            esp_openclaw_room_note_gateway_unreachable();
+        }
         (void)schedule_operator_start(2000);
     }
 }
@@ -733,6 +912,14 @@ static void record_operator_session_result(esp_err_t err)
 
 static esp_err_t start_operator_client(void)
 {
+    /* FIELD 2026-10-20 (room node + tailscale): create could NO_MEM deep in
+     * internal-RAM pressure (microlink lane + TLS + AFE live). One WARN line
+     * with the heap verdict per attempt makes the retry loop diagnosable. */
+    ESP_LOGW("openclaw_room",
+             "operator create attempt: int_free=%lu int_largest=%lu psram_free=%lu",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     xSemaphoreTake(state_lock, portMAX_DELAY);
     esp_openclaw_node_handle_t existing = operator_client;
     xSemaphoreGive(state_lock);
@@ -898,6 +1085,12 @@ static void node_event(
     if (node_ready) node_session_missing = false;
     xSemaphoreGive(state_lock);
     refresh_home_facts();
+    if (event == ESP_OPENCLAW_NODE_EVENT_CONNECT_FAILED) {
+        /* The node client dials the same gateway name: a failed connect may
+         * mean the cached answer is dead (or the gateway moved). Drop it so
+         * the next resolve re-reads the peer table. */
+        esp_openclaw_room_note_gateway_unreachable();
+    }
     if (event == ESP_OPENCLAW_NODE_EVENT_CONNECTED) {
         /*
          * The session URI lands in NVS only after the first hello-ok, so the
@@ -1641,11 +1834,24 @@ esp_err_t esp_openclaw_room_node_start(const esp_openclaw_room_node_config_t *co
         ESP_LOGE(TAG, "node connect request failed: %s", esp_err_to_name(connect_err));
         room_ui_set(ROOM_UI_ERROR, "Node connect");
     }
+    /* FIELD 2026-10-21: prime the operator client at boot, while the heap
+     * is pristine (this runs BEFORE tailscale_manager_start spawns the lane
+     * and its ~22KB of internal tenants). Retry loops thereafter only ever
+     * reconnect the existing client — the create path's internal churn
+     * (persisted-session load + 6KB worker stack spawn) can no longer lose
+     * the race in a fragmented heap, which is what NO_MEMd operator create
+     * forever in the referee-call logs (largest 7936 AND 6912). */
+    esp_err_t prime_err = start_operator_client();
+    ESP_LOGI(TAG, "operator client primed at boot: %s", esp_err_to_name(prime_err));
     ESP_LOGI(
         TAG,
         "room node ready; internal heap free=%u largest=%u, psram free=%u",
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    /* Boot baseline: stack HWM map + block counts at the one healthy
+     * moment (everything resident, nothing fragmented yet). Diffs against
+     * post-teardown inventory name stack growth and shard drift. */
+    room_heap_census_log("boot_ready");
     return ESP_OK;
 }
