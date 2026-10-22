@@ -373,11 +373,50 @@ static int find_peer_by_disco_key(microlink_t *ml, const uint8_t *disco_key) {
     return -1;
 }
 
+/* ADOPTION STEP 9: eviction history ring. With ML_MAX_PEERS configured
+ * small and the coordination map re-delivering every tailnet peer
+ * continuously, an evicted peer returns within seconds -- each re-add evicts
+ * ANOTHER peer, sends CallMeMaybe and a forced disco ping, flooding the
+ * DERP relay at idle (measured ~7-10 frames/s over the relay the data path
+ * depends on). The re-add suppression in add_peer consults this ring. */
+#define EVICT_HIST_LEN 8
+static struct {
+    uint8_t  key[32];
+    uint64_t at_ms;
+} evict_hist[EVICT_HIST_LEN];
+static int evict_hist_next = 0;
+
+static void record_eviction_key(const uint8_t *key) {
+    int slot = evict_hist_next;
+    memcpy(evict_hist[slot].key, key, 32);
+    evict_hist[slot].at_ms = ml_get_time_ms();
+    evict_hist_next = (slot + 1) % EVICT_HIST_LEN;
+}
+
 static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* Peer allowlist filter: don't waste WG slots on non-allowed peers.
      * Still process updates for existing peers (they may become allowed later). */
     if (!ml_config_peer_is_allowed(ml->config_httpd, update->vpn_ip)) {
         return -1;  /* Silently skip — peer not in allowlist */
+    }
+
+    /* ADOPTION STEP 9: re-add suppression for recently-evicted peers. With
+     * a small table and a continuously re-delivering coord map, an evicted
+     * peer returns within seconds and would evict ANOTHER peer + send
+     * CallMeMaybe + force-ping on every cycle. Skip it for 60s; a genuinely
+     * new peer is never in the ring, and a priority peer is never evicted
+     * -- neither can be wrongly suppressed. */
+    {
+        uint64_t now = ml_get_time_ms();
+        for (int i = 0; i < EVICT_HIST_LEN; i++) {
+            if (evict_hist[i].at_ms == 0) continue;
+            if (memcmp(evict_hist[i].key, update->public_key, 32) != 0) continue;
+            if (now - evict_hist[i].at_ms < 60000) {
+                ESP_LOGI(TAG, "Suppressed re-add of peer evicted %llums ago",
+                         (unsigned long long)(now - evict_hist[i].at_ms));
+                return -1;
+            }
+        }
     }
 
     /* Check if peer already exists */
@@ -420,6 +459,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                                             ml->peers[evict_idx].wg_peer_index);
                 }
                 ml->peers[evict_idx].active = false;
+                /* ADOPTION STEP 9: record the evicted key so add_peer can
+                 * suppress the immediate re-add churn. A stamp on the slot
+                 * is useless: idx = evict_idx hands the slot to the incoming
+                 * peer, overwriting the record. */
+                record_eviction_key(ml->peers[evict_idx].public_key);
                 idx = evict_idx;
             }
         }
@@ -673,7 +717,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
     /* Send CallMeMaybe to trigger peer-initiated handshake (NAT traversal).
      * Skip on cellular: our endpoints are behind carrier-grade NAT and
      * unreachable — all traffic goes through DERP relay. */
-    if (!ml_at_socket_is_ready()) {
+    /* ADOPTION STEP 9: CMM only for NEW peers — the coord map re-delivers
+     * peers continuously, and CMM on every update was the main source of
+     * idle DERP traffic. The peer already has our endpoints from the first
+     * CMM; re-sending changes nothing but relay load. */
+    if (!is_update && !ml_at_socket_is_ready()) {
         disco_send_call_me_maybe(ml, idx);
     }
 
@@ -682,7 +730,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * the periodic probe (every 15s) will handle the rest.
      * Skip on cellular: direct probes fill DERP TX queue (~0.6s each on AT socket),
      * blocking time-critical WG handshake responses. */
-    if (!ml_at_socket_is_ready()) {
+    if (!is_update && !ml_at_socket_is_ready()) {
         static uint64_t last_burst_ms = 0;
         static int burst_count = 0;
         uint64_t add_now = ml_get_time_ms();
