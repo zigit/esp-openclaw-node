@@ -42,6 +42,7 @@
 #include "lwip/sys.h"
 #include "lwip/timeouts.h"
 #include "lwip/tcpip.h"
+#include "esp_heap_caps.h"
 
 #include "wireguard.h"
 #include "crypto.h"
@@ -537,11 +538,39 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
 								if (dest_ok) {
-									// Send packet to be processed by LWIP
-									WG_DEBUG("[WG_RX_IP] Passing %u bytes to IP layer\n", (unsigned)pbuf->tot_len);
-									ip_input(pbuf, device->netif);
-									// pbuf is owned by IP layer now
+									// Send packet to be processed by LWIP.
+									// ADOPTION STEP 10 (crash fix, field-proven
+									// 2026-10-17 and re-observed 2026-10-22): this
+									// thread called ip_input DIRECTLY, racing the
+									// tcpip thread's pcb-list walks -- the panic
+									// signature is an Interrupt WDT timeout on
+									// CPU0 inside tcpip_thread (memp_free ->
+									// sys_arch_unprotect -> spinlock), right
+									// after WG DATA arrives. Route through
+									// netif->input (= tcpip_input in microlink's
+									// netif setup, ml_wg_mgr.c) so injection is
+									// serialized on the tcpip mailbox -- the
+									// lwIP-correct path for a netif driver
+									// under NO_SYS=0.
+									err_t inp_ret;
+									if (device->netif->input) {
+										inp_ret = device->netif->input(pbuf, device->netif);
+									} else {
+										// No tcpip wiring (bare config): legacy direct path.
+										inp_ret = ip_input(pbuf, device->netif);
+									}
+#if LWIP_TCPIP_CORE_LOCKING_INPUT
+									/* input_fn already ran inside the lock — pbuf consumed either way. */
+									(void)inp_ret;
 									pbuf = NULL;
+#else
+									if (inp_ret == ERR_OK) {
+										/* Posted to the tcpip mailbox — consumed there. */
+										pbuf = NULL;
+									}
+									/* ERR_MEM: msg alloc / trypost failed, pbuf still ours —
+									 * the existing free below handles it. */
+#endif
 								} else {
 									WG_DEBUG("[WG_RX_IP] DROPPED: dest_ok=false\n");
 								}
@@ -1000,6 +1029,21 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
 }
 
 
+/* ADOPTION STEP 11 (heap residency, field-proven on the Waveshare AMOLED
+ * board): the wireguard device + peers allocation (~23KB with a 16-peer
+ * table) lands in INTERNAL SRAM by default. On a device that also runs an
+ * audio pipeline, internal heap then fragments down to a few hundred bytes
+ * and every TLS handshake fails with ESP_FAIL (mbedTLS cannot allocate).
+ * Observed: internal_largest=416 at the moment of the ws connect failures.
+ * The device struct is long-lived and not latency-critical (packet crypto
+ * touches per-peer state, not the whole struct), so PSRAM is the right
+ * home; fall back to internal if SPIRAM is unavailable. */
+static void *wg_device_calloc(size_t n, size_t size)
+{
+    void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+    return p != NULL ? p : calloc(n, size);
+}
+
 err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *p, u8_t *peer_index) {
 	LWIP_ASSERT("netif != NULL", (netif != NULL));
 	LWIP_ASSERT("state != NULL", (netif->state != NULL));
@@ -1237,7 +1281,7 @@ err_t wireguardif_init(struct netif *netif) {
 			// In magicsock mode, skip creating UDP socket - packets come via inject_packet
 			if (g_disable_socket_bind) {
 				WG_DEBUG("[WG] Socket binding disabled - using magicsock mode\n");
-				device = (struct wireguard_device *)mem_calloc(1, sizeof(struct wireguard_device));
+				device = (struct wireguard_device *)wg_device_calloc(1, sizeof(struct wireguard_device));
 				if (device) {
 					device->netif = netif;
 					device->udp_pcb = NULL;  // No internal socket
@@ -1281,7 +1325,7 @@ err_t wireguardif_init(struct netif *netif) {
 				if (udp) {
 					result = udp_bind(udp, IP_ADDR_ANY, init_data->listen_port); // Note this listens on all interfaces! Really just want the passed netif
 					if (result == ERR_OK) {
-						device = (struct wireguard_device *)mem_calloc(1, sizeof(struct wireguard_device));
+						device = (struct wireguard_device *)wg_device_calloc(1, sizeof(struct wireguard_device));
 						if (device) {
 							device->netif = netif;
 							if (init_data->bind_netif) {
