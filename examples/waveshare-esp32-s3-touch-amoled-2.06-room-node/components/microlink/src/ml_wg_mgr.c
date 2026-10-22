@@ -486,6 +486,26 @@ static void hex32(const uint8_t *k, char *out, int n) {
     out[2 * n] = 0;
 }
 
+/* FIELD 2026-10-22: eviction history ring. add_peer's re-add suppression
+ * CANNOT use a stamp on the evicted slot: the slot is immediately reused
+ * for the incoming peer (idx = evict_idx), overwriting the evicted peer's
+ * record including any stamp. So the history of recently-evicted keys
+ * lives here, surviving slot reuse. 8 entries cover the churn cycle on a
+ * 26-peer tailnet with max_peers=4. */
+#define EVICT_HIST_LEN 8
+static struct {
+    uint8_t  key[32];
+    uint64_t at_ms;
+} evict_hist[EVICT_HIST_LEN];
+static int evict_hist_next = 0;
+
+static void record_eviction_key(const uint8_t *key) {
+    int slot = evict_hist_next;
+    memcpy(evict_hist[slot].key, key, 32);
+    evict_hist[slot].at_ms = ml_get_time_ms();
+    evict_hist_next = (slot + 1) % EVICT_HIST_LEN;
+}
+
 /* Diagnostic (2026-10-18): on an unknown-disco-key drop, dump the sender's
  * key + every active stored peer's key + heap, so the boot log shows whether
  * the table is empty, holds the wrong keys, or holds an all-zero disco key. */
@@ -538,13 +558,12 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * can never be evicted, so it is never suppressed. */
     {
         uint64_t now = ml_get_time_ms();
-        for (int i = 0; i < ml->peer_count; i++) {
-            if (ml->peers[i].active) continue;
-            if (ml->peers[i].evicted_at_ms == 0) continue;
-            if (memcmp(ml->peers[i].public_key, update->public_key, 32) != 0) continue;
-            if (now - ml->peers[i].evicted_at_ms < 60000) {
-                ESP_LOGI(TAG, "Suppressed re-add of recently evicted peer %s",
-                         ml->peers[i].hostname);
+        for (int i = 0; i < EVICT_HIST_LEN; i++) {
+            if (evict_hist[i].at_ms == 0) continue;
+            if (memcmp(evict_hist[i].key, update->public_key, 32) != 0) continue;
+            if (now - evict_hist[i].at_ms < 60000) {
+                ESP_LOGI(TAG, "Suppressed re-add of peer evicted %llums ago",
+                         (unsigned long long)(now - evict_hist[i].at_ms));
                 return -1;
             }
             /* Window expired: allow the re-add through. */
@@ -617,9 +636,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                                             ml->peers[evict_idx].wg_peer_index);
                 }
                 ml->peers[evict_idx].active = false;
-                /* FIELD 2026-10-22: stamp the eviction so add_peer can
-                 * suppress the immediate re-add churn (see below). */
-                ml->peers[evict_idx].evicted_at_ms = ml_get_time_ms();
+                /* FIELD 2026-10-22: record the evicted key in the history
+                 * ring so add_peer can suppress the immediate re-add churn.
+                 * (A stamp on the slot is useless: idx = evict_idx hands
+                 * the slot to the incoming peer, overwriting the record.) */
+                record_eviction_key(ml->peers[evict_idx].public_key);
                 idx = evict_idx;
             }
         }
@@ -655,9 +676,11 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
                 /* FIELD 2026-10-21: clear the slot index (the slot is
                  * reused; a stale index points at another peer's entry). */
                 ml->peers[evict_idx].wg_peer_index = -1;
-                /* FIELD 2026-10-22: stamp the eviction so add_peer can
-                 * suppress the immediate re-add churn (see below). */
-                ml->peers[evict_idx].evicted_at_ms = ml_get_time_ms();
+                /* FIELD 2026-10-22: record the evicted key in the history
+                 * ring so add_peer can suppress the immediate re-add churn.
+                 * (A stamp on the slot is useless: idx = evict_idx hands
+                 * the slot to the incoming peer, overwriting the record.) */
+                record_eviction_key(ml->peers[evict_idx].public_key);
                 idx = evict_idx;
             }
         }

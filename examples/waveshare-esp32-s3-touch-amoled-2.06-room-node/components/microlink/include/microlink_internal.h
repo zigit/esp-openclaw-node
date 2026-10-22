@@ -280,15 +280,6 @@ typedef struct {
     uint64_t trust_until_ms;        /* Direct path trusted until */
     uint64_t last_send_ms;          /* Last data sent to this peer */
     uint64_t last_upgrade_ms;       /* Last path upgrade attempt */
-    /* FIELD 2026-10-22 (Fredrik: limit peers / DISCO filtering): timestamp
-     * of the last eviction of this SLOT. The coord map re-delivers ALL
-     * tailnet peers continuously into a small table, so an evicted peer
-     * comes back within seconds - each re-add evicts ANOTHER peer, sends
-     * CallMeMaybe and a forced disco ping: 408 evictions logged, ~7-10
-     * DERP frames/s at idle, right over the relay a call depends on.
-     * The suppression window in add_peer uses this to let churn settle.
-     * 0 = never evicted (or actively held). */
-    uint64_t evicted_at_ms;
 
     /* Best direct path */
     uint32_t best_ip;
