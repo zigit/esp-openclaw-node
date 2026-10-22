@@ -20,6 +20,8 @@
 #include <fcntl.h>
 #include "lwip/sockets.h"
 
+#include "esp_heap_caps.h"  /* ADOPTION STEP 12: MALLOC_CAP_SPIRAM for task stacks */
+
 #ifdef CONFIG_ML_ENABLE_CELLULAR
 #include "ml_cellular.h"
 #endif
@@ -370,15 +372,36 @@ skip_bsd_socket:
     /* Create tasks */
     BaseType_t ret;
 
-    ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
-                                   ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
+    /* ADOPTION STEP 12 (PSRAM stacks, field-proven): the net_io (8K) and
+     * derp_tx (14K) stacks total 22KB of internal RAM on a device where
+     * internal heap is the scarcest resource (measured: adoption boots
+     * bottom out at int_free~4.9K vs ~27K on main, and the TLS handshake
+     * for the control websocket needs several contiguous KB). Move both to
+     * PSRAM (CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y); plain internal
+     * spawn as fallback for non-PSRAM boards. coord + wg_mgr stay
+     * INTERNAL — they call flash APIs (NVS) and must not stall on
+     * PSRAM stack fetches during flash ops. */
+    ret = xTaskCreatePinnedToCoreWithCaps(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
+                                   ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE,
+                                   MALLOC_CAP_SPIRAM);
+    ml->net_io_task_caps = (ret == pdPASS);
+    if (ret != pdPASS) {
+        ret = xTaskCreatePinnedToCore(ml_net_io_task, "ml_net_io", ML_TASK_NET_IO_STACK,
+                                       ml, ML_TASK_NET_IO_PRIO, &ml->net_io_task, ML_TASK_NET_IO_CORE);
+    }
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create net_io task");
         return ESP_FAIL;
     }
 
-    ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
-                                   ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
+    ret = xTaskCreatePinnedToCoreWithCaps(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
+                                   ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE,
+                                   MALLOC_CAP_SPIRAM);
+    ml->derp_tx_task_caps = (ret == pdPASS);
+    if (ret != pdPASS) {
+        ret = xTaskCreatePinnedToCore(ml_derp_tx_task, "ml_derp_tx", ML_TASK_DERP_TX_STACK,
+                                       ml, ML_TASK_DERP_TX_PRIO, &ml->derp_tx_task, ML_TASK_DERP_TX_CORE);
+    }
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create derp_tx task");
         return ESP_FAIL;

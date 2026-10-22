@@ -372,6 +372,10 @@ struct microlink_s {
     /* Task handles */
     TaskHandle_t net_io_task;
     TaskHandle_t derp_tx_task;
+    /* ADOPTION STEP 12: true when the stack was allocated WithCaps
+     * (PSRAM) — needed so cleanup knows the handle is caps-backed. */
+    bool net_io_task_caps;
+    bool derp_tx_task_caps;
     TaskHandle_t coord_task;
     TaskHandle_t wg_mgr_task;
 
