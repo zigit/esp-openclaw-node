@@ -56,11 +56,29 @@ extern "C" {
  * prio 5-7 opened 6-14 calls, the prio-19 boot opened 0).
  * The real defect is the SPIN, not the priority — fixed in ml_derp.c
  * (yield 1ms -> 10ms). Priorities restored to their original values. */
-#define ML_TASK_NET_IO_PRIO     7
+/* FIELD 2026-10-22 (Fredrik's ping finding + room_talk_cpu ticks): during
+ * a call the media pipeline (buffer_in=47-72%, Adec=33-37%, aenc_0=29-48%
+ * of the dual-core budget) starved these tasks at prio 5/7 completely -
+ * the gateway's tunnel ping to the board died the instant a call started
+ * while TURN audio kept flowing, STUN probes went unanswered (3 retries
+ * -> fail) and DERP writes stalled past the derper's 2s write deadline ->
+ * RST (-0x0050) -> the media peer's binding keepalives stopped -> the
+ * gateway's 30s timeout killed every call ~44s in. Idle was always clean
+ * because the DSP tasks do not run.
+ * Raise all four to 12: ABOVE the media/GMF tasks (aud_src/aenc/buffer_in
+ * =10, esp_openclaw_no=11) so a starved network stack cannot happen again,
+ * BELOW the system-critical layers (AUD_SRC/websocket=15, tiT=18,
+ * esp_timer=22, wifi/ml_udp_rx=23, ipc=24). They are event-driven (queue/
+ * select/timeout waits), so they preempt only for real network work.
+ * HISTORY CAUTION: prio 19 once made the board deaf (0 calls) - but that
+ * was the 1ms-spin defect, since fixed (yield 10ms, see ml_derp.c). 12 is
+ * three levels under the audio-realtime floor and keeps I2S capture (15)
+ * untouched. */
+#define ML_TASK_NET_IO_PRIO     12
 #define ML_TASK_NET_IO_CORE     0
 
 #define ML_TASK_DERP_TX_STACK   (14 * 1024)
-#define ML_TASK_DERP_TX_PRIO    5
+#define ML_TASK_DERP_TX_PRIO    12
 #define ML_TASK_DERP_TX_CORE    0
 
 	/* FIELD 2026-10-21: shrink sized from measured HWM (watch list, heartbeatalive):
@@ -68,7 +86,7 @@ extern "C" {
 	 * flash ops) so residency stays, but the freed 3KB slab at boot was starving
 	 * the operator client create (ESP_ERR_NO_MEM when largest < 8KB). */
 #define ML_TASK_COORD_STACK     (9 * 1024)
-#define ML_TASK_COORD_PRIO      5
+#define ML_TASK_COORD_PRIO      12
 #define ML_TASK_COORD_CORE      1
 
 	/* FIELD 2026-10-21: shrink sized from measured HWM 5096 -> ship 6KB (18%% margin,
@@ -76,7 +94,7 @@ extern "C" {
 	 * this 1KB plus the peer_update queue relief is what lets the lane spawn after
 	 * the operator client is primed at boot. */
 #define ML_TASK_WG_MGR_STACK    (6 * 1024)
-#define ML_TASK_WG_MGR_PRIO     7
+#define ML_TASK_WG_MGR_PRIO     12
 #define ML_TASK_WG_MGR_CORE     1
 
 /* Queue depths */
