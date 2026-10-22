@@ -24,6 +24,7 @@
 #include "esp_webrtc.h"
 #include "esp_capture.h"
 #include "freertos/idf_additions.h"
+#include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
@@ -128,6 +129,64 @@ static void talk_snap_tick(void *arg)
         ESP_LOGI(TAG, "room_talk_wifi rssi=%d chan=%d", ap.rssi, ap.primary);
     } else {
         ESP_LOGW(TAG, "room_talk_wifi: sta_get_ap_info FAILED — link down?");
+    }
+
+    /* FIELD 2026-10-22 (Fredrik's ping finding): a ping from the gateway to
+     * the board's tailscale IP stops the moment a call starts, while TURN
+     * audio keeps flowing — the WG-tunnel path (net_io → wg_mgr → tcpip)
+     * goes dark while the webrtc tasks keep running. Not the radio; almost
+     * certainly CPU starvation of the microlink network tasks by the call's
+     * DSP pipeline. This names the eater: top-3 tasks by CPU share each 5s
+     * window (runtime-stats counters diffed against the previous tick). */
+    {
+#define CPU_SNAP_MAX 48
+        static TaskStatus_t snap[CPU_SNAP_MAX];
+        static TaskStatus_t prev[CPU_SNAP_MAX];
+        static UBaseType_t prev_n = 0;
+        static uint32_t prev_total = 0;
+        uint32_t total_now = 0;
+        UBaseType_t n = uxTaskGetSystemState(snap, CPU_SNAP_MAX, &total_now);
+        if (n > 0 && prev_n > 0 && total_now > prev_total) {
+            uint32_t dtotal = total_now - prev_total;
+            /* top-3 by runtime delta across the window */
+            UBaseType_t top_i[3] = {0, 0, 0};
+            uint32_t top_d[3] = {0, 0, 0};
+            for (UBaseType_t i = 0; i < n; i++) {
+                uint32_t d = 0;
+                for (UBaseType_t j = 0; j < prev_n; j++) {
+                    if (prev[j].xHandle == snap[i].xHandle) {
+                        uint32_t c_now = snap[i].ulRunTimeCounter;
+                        uint32_t c_prev = prev[j].ulRunTimeCounter;
+                        if (c_now > c_prev) d = c_now - c_prev;
+                        break;
+                    }
+                }
+                if (d > top_d[0]) {
+                    top_d[2] = top_d[1]; top_i[2] = top_i[1];
+                    top_d[1] = top_d[0]; top_i[1] = top_i[0];
+                    top_d[0] = d; top_i[0] = i;
+                } else if (d > top_d[1]) {
+                    top_d[2] = top_d[1]; top_i[2] = top_i[1];
+                    top_d[1] = d; top_i[1] = i;
+                } else if (d > top_d[2]) {
+                    top_d[2] = d; top_i[2] = i;
+                }
+            }
+            if (dtotal > 0) {
+                ESP_LOGI(TAG, "room_talk_cpu %s=%u%% %s=%u%% %s=%u%%",
+                         snap[top_i[0]].pcTaskName,
+                         (unsigned)(top_d[0] * 100 / dtotal),
+                         snap[top_i[1]].pcTaskName,
+                         (unsigned)(top_d[1] * 100 / dtotal),
+                         snap[top_i[2]].pcTaskName,
+                         (unsigned)(top_d[2] * 100 / dtotal));
+            }
+        }
+        if (n > 0) {
+            memcpy(prev, snap, sizeof(TaskStatus_t) * n);
+            prev_n = n;
+            prev_total = total_now;
+        }
     }
 }
 
