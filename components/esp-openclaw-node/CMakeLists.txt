@@ -7,6 +7,7 @@ set(esp_openclaw_node_component_args
         "src/esp_openclaw_node_registry.c"
         "src/esp_openclaw_node_protocol.c"
         "src/esp_openclaw_node_transport.c"
+        "src/esp_openclaw_node_lwip_diag.c"
         "src/esp_openclaw_node_runtime.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "private_include"

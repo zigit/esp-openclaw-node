@@ -1,5 +1,14 @@
 menu "OpenClaw room node"
 
+config OPENCLAW_ROOM_HEAP_CENSUS_REGION_DUMP
+    bool "Heap census: verbose per-region dump"
+    default n
+    help
+        Enables heap_caps_print_heap_info in room_heap_census_log. The one-line
+        census summaries and block counts always print; this adds the multi-line
+        IDF per-region dump. Heavy: contributed to a Tmr Svc stack overflow under
+        heap pressure (2026-10-21). Enable only for targeted captures.
+
 config OPENCLAW_ROOM_WIFI_SSID
     string "Wi-Fi SSID"
     default ""
@@ -47,5 +56,17 @@ config OPENCLAW_ROOM_CALL_IDLE_SECONDS
     int "Maximum call lifetime in seconds"
     range 15 1800
     default 180
+
+config OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK
+    int "Refuse call when internal largest block below (bytes); 0 disables"
+    range 0 16384
+    default 3584
+    help
+        Death-certificate guard (2026-10-21): the talk-mode audio pipeline
+        reopen carves ~14KB internal AFTER transports are established; when
+        the largest internal block at admission is below the carve size, a
+        call either goes zombie (pipeline open fails) or aborts both
+        transports ~19s in (ECONNABORTED). Refusing early gives a clean
+        error face instead. 3584 = measured zombie threshold; 0 disables.
 
 endmenu

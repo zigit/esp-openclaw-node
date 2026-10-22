@@ -7,8 +7,15 @@
 
 void room_audio_gate_init(room_audio_gate_t *gate, const char *mic_layout)
 {
+    room_audio_gate_init_ex(gate, mic_layout, false);
+}
+
+void room_audio_gate_init_ex(room_audio_gate_t *gate, const char *mic_layout,
+                             bool force_half_duplex)
+{
     /* NULL has the capture source's default MR layout. */
-    gate->enabled = mic_layout != NULL && strchr(mic_layout, 'R') == NULL;
+    gate->enabled = force_half_duplex ||
+        (mic_layout != NULL && strchr(mic_layout, 'R') == NULL);
     atomic_init(&gate->playing, false);
     atomic_init(&gate->tail_us, 0);
 }

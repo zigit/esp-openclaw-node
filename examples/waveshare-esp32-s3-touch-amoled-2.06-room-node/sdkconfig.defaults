@@ -7,9 +7,6 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_NONE=y
-CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="../../certificates/public-roots.pem"
 CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
 CONFIG_SR_WN_WN9_HIESP=y
@@ -36,8 +33,11 @@ CONFIG_LV_DRAW_BUF_ALIGN=16
 # Two node clients (node + operator role) each run a component task and a
 # websocket task, and all four stacks must be internal RAM. 12 KiB each cost
 # 48 KiB of the scarcest pool and starved websocket task creation once the
-# always-on audio pipeline was added; 8 KiB matches the IDF default.
-CONFIG_ESP_OPENCLAW_NODE_TASK_STACK_SIZE=8192
+# always-on audio pipeline was added; 8 KiB matched the IDF default until the
+# microlink tailnet lane joined the stack — after that the second (operator)
+# create saw int_largest=7680 and 8 KiB no longer fit; 7168 does (FIELD
+# 2026-10-20: operator create attempt verdicts in serial).
+CONFIG_ESP_OPENCLAW_NODE_TASK_STACK_SIZE=6144
 CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_STACK_SIZE=8192
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # PSRAM-first memory policy, matching every esp-webrtc-solution demo config
@@ -45,7 +45,11 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # 256-byte always-internal threshold. Without these, DTLS peer setup and the
 # websocket task fail internal-heap allocation once display + audio are up.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16
+# FIELD 2026-10-21 (was 256): the flood of <=256B allocations staying internal
+# shattered the remaining ~2KB bank to 500B shards within ~70s of traffic, then
+# even ws-task TCBs (~1KB) failed to spawn. Crisis-era lever: tiny allocs ride
+# PSRAM; internal stays reserved for TCBs/DMA. Revisit if hot-path perf degrades.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # During a call the audio pipeline runs at priority 10-20 on both cores and a
 # priority-5 node/websocket task starves entirely: node.invoke (face.set,
@@ -53,7 +57,42 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # workers but below the latency-critical capture (15) and peer (18) tasks;
 # command handling is microsecond-scale JSON work.
 CONFIG_ESP_OPENCLAW_NODE_TASK_PRIORITY=11
-CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY=11
+CONFIG_ESP_OPENCLAW_NODE_TRANSPORT_TASK_PRIORITY=15
 # 60 Hz refresh for the animated face: measured face redraw cost is a few
 # MB/s against a ~25 MB/s panel budget. Fast saccades visibly smooth out.
 CONFIG_LV_DEF_REFR_PERIOD=16
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+# 2026-10-21: decoded WDT traces (ELF addr2line) show pc_task/WebRTC recv
+# (agent_recv_one_packet, srtp_unprotect, rtp_jitter_add) plus taskLVGL redraw
+# also starving IDLE1 during calls — same call-load signature as CPU0.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+# 2026-10-21 diagnostic: dual ws-abort fault snapshot — lwip_stats read in
+# esp_openclaw_node_lwip_diag_dump() at ws DISCONNECTED/ERROR with captured
+# TLS failure. Diagnostic build; revisit once the aborter is named.
+# diagnostic 2026-10-21: fault snapshot at ws transport failure
+CONFIG_LWIP_STATS=y
+# diagnostic 2026-10-21: task-stack high-water inventory in room_heap_census
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+# VETOED 2026-10-21: CONFIG_HEAP_TASK_TRACKING=y broke lane bring-up — its per-block
+# tracking metadata shrank the early-boot internal heap so the mandatory-internal
+# ml_coord task could not spawn ("Failed to create coord task" -> microlink_start
+# ESP_FAIL -> DERP conn=0 forever -> MagicDNS dead -> node connect storm). Two boots
+# reproduced; reverted. Per-task attribution needs a different mechanism on this board.
+# CONFIG_HEAP_TASK_TRACKING is not set
+# 2026-10-21 stabilization: Tmr Svc stack overflow (panic via vApplicationStackOverflowHook
+# from vTaskSwitchContext) hit right after census teardown_end — the 2048-word default has
+# no headroom under heap pressure. 4096 words kills the crash class.
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# Death-certificate guard (11:31 tick capture): pipeline reopen carves ~14KB internal
+# after transports are established; refuse admission below the zombie floor (3584).
+CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK=3584
+
+# --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
+CONFIG_TS_ENABLE=y
+# wireguard_lwip links mbedtls_chachapoly_*; kconfgen only fills ABSENT symbols,
+# so these pins apply only to fresh checkouts — the existing generated sdkconfig
+# must be sed'd at the authoritative layer (field trap, 3 instances).
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+# NOTE: CONFIG_TS_AUTH_KEY belongs ONLY in the git-ignored sdkconfig.credentials overlay.

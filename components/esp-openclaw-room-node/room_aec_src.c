@@ -92,8 +92,21 @@ typedef struct {
     uint8_t                     in_error     : 1;
     uint8_t                     stopping     : 1;
     bool                        wait_feeding : 1;
+    /* FIELD 2026-10-21: feed backoff until (ms); 0 = no backoff. Stops the
+     * AFE 'ringbuffer full' WARN flood when nothing drains the AFE. */
+    uint64_t                    feed_backoff_until_ms;
     const esp_afe_sr_iface_t   *afe_handle;
     esp_afe_sr_data_t          *afe_data;
+    /* Dual-resident AFE (2026-10-21 fix): both pipeline flavors are built
+     * ONCE at source creation, on the pristine boot heap — ambient (WakeNet)
+     * and talk (AEC+NLP only). Open/stop then only switch pointers; the
+     * per-call talk-mode reopen used to carve ~12-14KB INTERNAL from the
+     * live heap after transports were established (measured death
+     * certificate 11:31/11:41) — that carve never happens again. */
+    const esp_afe_sr_iface_t   *afe_handle_ambient;
+    esp_afe_sr_data_t          *afe_data_ambient;
+    const esp_afe_sr_iface_t   *afe_handle_talk;
+    esp_afe_sr_data_t          *afe_data_talk;
     srmodel_list_t             *models;
     audio_aec_vad_res_t        *vad_res;
     void                      (*wake_cb)(void *ctx);
@@ -169,9 +182,65 @@ static bool audio_aec_chunk_samples_to_bytes(int samples, int *bytes)
     return true;
 }
 
+static int create_dual_afe_in_ram(void *arg)
+{
+    audio_aec_src_t *src = (audio_aec_src_t *)arg;
+    src->models = esp_srmodel_init("model");
+    if (src->models == NULL) {
+        ESP_LOGW(TAG, "No model to load");
+        return ESP_FAIL;
+    }
+    /* Ambient flavor: speech-recognition AFE with WakeNet (and VAD per
+     * data_on_vad, mirroring the legacy config). */
+    afe_config_t *cfg = afe_config_init(src->mic_layout, src->models,
+                                        AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (cfg != NULL) {
+        cfg->wakenet_init = true;
+        if (src->data_on_vad) cfg->vad_init = false;
+        const esp_afe_sr_iface_t *handle = esp_afe_handle_from_config(cfg);
+        esp_afe_sr_data_t *data =
+            handle != NULL ? handle->create_from_config(cfg) : NULL;
+        afe_config_free(cfg);
+        src->afe_handle_ambient = handle;
+        src->afe_data_ambient = data;
+        if (data == NULL) ESP_LOGE(TAG, "ambient AFE dataset create failed");
+    }
+    /* Talk flavor: voice-communication pipeline, AEC+NLP preserved,
+     * WakeNet/NS/VAD off (mirrors the legacy talk-open config). */
+    afe_config_t *talk_cfg = afe_config_init(src->mic_layout, src->models,
+                                             AFE_TYPE_VC, AFE_MODE_LOW_COST);
+    if (talk_cfg != NULL) {
+        talk_cfg->wakenet_init = false;
+        talk_cfg->ns_init = false;
+        talk_cfg->vad_init = false;
+        const esp_afe_sr_iface_t *handle = esp_afe_handle_from_config(talk_cfg);
+        esp_afe_sr_data_t *data =
+            handle != NULL ? handle->create_from_config(talk_cfg) : NULL;
+        afe_config_free(talk_cfg);
+        src->afe_handle_talk = handle;
+        src->afe_data_talk = data;
+        if (data == NULL) ESP_LOGE(TAG, "talk AFE dataset create failed");
+    }
+    return (src->afe_data_ambient != NULL && src->afe_data_talk != NULL)
+        ? 0 : ESP_FAIL;
+}
+
 static int open_afe_in_ram(void *arg)
 {
     audio_aec_src_t *src = (audio_aec_src_t *)arg;
+    /* Dual-resident fast path: selection costs zero bytes. The heavy
+     * create_from_config()s ran at boot when the internal heap was
+     * pristine (see create_dual_afe_in_ram). */
+    if (src->afe_data_ambient != NULL && src->afe_data_talk != NULL) {
+        if (src->wakenet_enabled) {
+            src->afe_handle = src->afe_handle_ambient;
+            src->afe_data   = src->afe_data_ambient;
+        } else {
+            src->afe_handle = src->afe_handle_talk;
+            src->afe_data   = src->afe_data_talk;
+        }
+        return ESP_CAPTURE_ERR_OK;
+    }
     esp_capture_err_t ret = ESP_CAPTURE_ERR_OK;
     do {
         src->models = esp_srmodel_init("model");
@@ -283,7 +352,27 @@ static inline void audio_aec_fill_vad_working_buf(audio_aec_src_t *src, uint8_t 
 
 static int audio_aec_feed_data(audio_aec_src_t *src, uint8_t *feed_data, int feed_size)
 {
+    /* FIELD 2026-10-21: the AFE library prints 'Ringbuffer of AFE(FEED) is
+     * full' from inside feed() when its input ring overflows — a per-block
+     * WARN that hammers the serial line (Fredrik, 20:21) and burns CPU on
+     * the exact core that must serve the call. The ring fills when nothing
+     * drains the AFE (during a call the wake sink is DISABLEd, so only the
+     * talk path fetches). Stop feeding a full ring: the data would be
+     * overwritten anyway, and the wake path is dead until the call ends.
+     * Short backoff so the drain can catch up, then resume. */
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (src->feed_backoff_until_ms > 0) {
+        if (now_ms < src->feed_backoff_until_ms) {
+            return 0;  /* skipped this block; the AFE keeps its old content */
+        }
+        src->feed_backoff_until_ms = 0;
+    }
     int ret = src->afe_handle->feed(src->afe_data, (int16_t *)feed_data);
+    if (ret < 0) {
+        /* Back off briefly: the ring is full, so more feeds only produce more
+         * 'ringbuffer full' warnings from the library. */
+        src->feed_backoff_until_ms = now_ms + 200;
+    }
     room_diagnostics_audio_record_feed(ret >= 0);
     return ret;
 }
@@ -764,6 +853,13 @@ static esp_capture_err_t audio_aec_src_read_frame(esp_capture_audio_src_if_t *h,
 static int close_afe_in_ram(void *arg)
 {
     audio_aec_src_t *src = (audio_aec_src_t *)arg;
+    /* Dual-resident: nothing to destroy — both datasets persist for the
+     * device lifetime and the next open just re-selects. Only the legacy
+     * fallback (datasets never built) tears anything down. */
+    if (src->afe_data_ambient != NULL && src->afe_data_talk != NULL) {
+        src->afe_data = NULL;
+        return 0;
+    }
     if (src->models) {
         esp_srmodel_deinit(src->models);
         src->models = NULL;
@@ -845,6 +941,15 @@ esp_capture_audio_src_if_t *room_capture_new_audio_aec_src(room_capture_audio_ae
         ESP_LOGE(TAG, "Failed to reserve AFE worker");
         capture_free(src);
         return NULL;
+    }
+    /* Build BOTH AFE datasets now, while the boot heap is still pristine
+     * (before the lane, TLS and AFE tenants carve their shares — boot
+     * measured 56KB free / 38KB largest). This is the 2026-10-21 fix for
+     * the mid-call dual ECONNABORTED: the talk reopen becomes a pointer
+     * swap and never competes with the TCP/TLS path for internal RAM. */
+    if (run_afe_work(src, create_dual_afe_in_ram) != 0) {
+        ESP_LOGW(TAG, "dual AFE residency unavailable; "
+                 "falling back to per-open create/destroy churn");
     }
     return &src->base;
 }
