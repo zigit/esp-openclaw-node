@@ -65,18 +65,21 @@ static void align_sh8601_flush(lv_event_t *event)
 static lv_display_t *waveshare_display_start(void *ctx)
 {
     (void)ctx;
-    /* FIELD 2026-10-23 (Fredrik: sluggish screen, unresponsive touch after
-     * calls): the BSP default LVGL task priority is 4 — below ml_wg_mgr,
-     * ml_coord, ml_derp_tx and ml_net_io (all prio 11), which burn 24-27%
-     * CPU in sustained DISCO/retry churn after every call (measured by the
-     * idle CPU probe: IDLE 67-70% pre-call, ml_wg_mgr=26% + IDLE0=30%
-     * post-call). taskLVGL at 4 loses that race and the display crawls.
-     * 7 lifts it above housekeeping (afe_worker 5, talk_teardown 6,
-     * ts_manager 4) while staying below every task that carries data
-     * (audio 10-18, websocket 15, network 11, udp_rx 23): bursty short
-     * flushes win whenever nothing data-carrying is ready, and the lane
-     * keeps its headroom. Buffers/caps copied verbatim from the BSP's own
-     * bsp_display_start() so nothing else changes. */
+    /* FIELD 2026-10-23 (Fredrik: sluggish face animations, unresponsive
+     * touch): two measurements drove this. (1) The idle CPU probe caught
+     * the post-call state: tl_wg_mgr churns 24-27% (DISCO 35 unmatched
+     * pongs/min + handshake-retry sweeps) against a BSP-default LVGL of
+     * prio 4 — the display simply loses. (2) Even at 7, DURING a call the
+     * board saturates (probe top-3: Adec=32% buffer_in=30% ml_wg_mgr=29%,
+     * IDLE not in the top-3 = ~95% busy) and the scheduler only
+     * round-robins among EQUAL priorities — so anything at 11+ still beats
+     * taskLVGL whenever it is runnable, for the whole call. The ladder has
+     * an empty band at 12-14: 13 puts the display above ALL housekeeping
+     * (lane 11, node clients 11, encoder 10) and below the media/websocket
+     * band (15-24) that carries the actual call. LVGL work is bursty short
+     * flushes; a deferred encoder frame or DISCO reply is inaudible, a
+     * dropped face frame is visible. Buffers/caps copied verbatim from the
+     * BSP's own bsp_display_start() so nothing else changes. */
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
         .buffer_size = BSP_LCD_DRAW_BUFF_SIZE,
@@ -85,7 +88,7 @@ static lv_display_t *waveshare_display_start(void *ctx)
             .buff_dma = false,
             .buff_spiram = true,
         }};
-    cfg.lvgl_port_cfg.task_priority = 7;
+    cfg.lvgl_port_cfg.task_priority = 13;
     lv_display_t *display = bsp_display_start_with_config(&cfg);
     if (display == NULL || !bsp_display_lock(0)) {
         return NULL;
