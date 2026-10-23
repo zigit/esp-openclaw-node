@@ -117,6 +117,21 @@ CONFIG_MBEDTLS_POLY1305_C=y
 CONFIG_MBEDTLS_CHACHAPOLY_C=y
 # NOTE: CONFIG_TS_AUTH_KEY belongs ONLY in the git-ignored sdkconfig.credentials overlay.
 
+# --- lwIP socket/PCB pools ---
+# FIELD 2026-10-23 11:10 (Fredrik's wake-word call died at socket CREATE):
+# "UDP: Failed to create socket on open" + "esp-tls: Failed to create socket"
+# + peer_disconnected result=5, with every log-level pin accounted for. The
+# stock MAX_SOCKETS=10 was marginal before; the config HTTPD (enabled this
+# session) consumed the last slots and the call's first UDP/TLS create hit
+# the empty pool. Room for the real tenants: DERP TLS + coord TLS + 2x ws
+# (node/operator) + DISCO UDP + echo lane UDP + DNS + httpd listener + its
+# per-conn sockets + the call's ICE UDP + signaling TLS, with TIME_WAIT
+# churn headroom on top.
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_MAX_ACTIVE_TCP=16
+CONFIG_LWIP_MAX_LISTENING_TCP=8
+CONFIG_LWIP_MAX_UDP_PCBS=24
+
 # --- lwIP netconn external-resolve hook (MagicDNS over the WG lane) ---
 # The tailscale_manager component implements lwip_hook_netconn_external_resolve()
 # (components/tailscale_manager/src/room_dns_hook.c) so the gateway's *.ts.net
