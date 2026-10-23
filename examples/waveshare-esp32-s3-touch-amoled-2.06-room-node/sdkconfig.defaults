@@ -105,6 +105,10 @@ CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK=3584
 
 # --- tailscale microlink lane (connectivity layer; see components/tailscale_manager) ---
 CONFIG_TS_ENABLE=y
+# FIELD 2026-10-23 (Fredrik): /api/peers/allowed GET/POST — manual DISCO-probe
+# allowlist while the pong-churn fix is pending. Serves on the board's VPN IP
+# (http://100.121.150.78/); gate default-16-peers per microlink Kconfig.
+CONFIG_ML_ENABLE_CONFIG_HTTPD=y
 # wireguard_lwip links mbedtls_chachapoly_*; kconfgen only fills ABSENT symbols,
 # so these pins apply only to fresh checkouts — the existing generated sdkconfig
 # must be sed'd at the authoritative layer (field trap, 3 instances).

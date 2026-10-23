@@ -65,21 +65,18 @@ static void align_sh8601_flush(lv_event_t *event)
 static lv_display_t *waveshare_display_start(void *ctx)
 {
     (void)ctx;
-    /* FIELD 2026-10-23 (Fredrik: sluggish face animations, unresponsive
-     * touch): two measurements drove this. (1) The idle CPU probe caught
-     * the post-call state: tl_wg_mgr churns 24-27% (DISCO 35 unmatched
-     * pongs/min + handshake-retry sweeps) against a BSP-default LVGL of
-     * prio 4 — the display simply loses. (2) Even at 7, DURING a call the
-     * board saturates (probe top-3: Adec=32% buffer_in=30% ml_wg_mgr=29%,
-     * IDLE not in the top-3 = ~95% busy) and the scheduler only
-     * round-robins among EQUAL priorities — so anything at 11+ still beats
-     * taskLVGL whenever it is runnable, for the whole call. The ladder has
-     * an empty band at 12-14: 13 puts the display above ALL housekeeping
-     * (lane 11, node clients 11, encoder 10) and below the media/websocket
-     * band (15-24) that carries the actual call. LVGL work is bursty short
-     * flushes; a deferred encoder frame or DISCO reply is inaudible, a
-     * dropped face frame is visible. Buffers/caps copied verbatim from the
-     * BSP's own bsp_display_start() so nothing else changes. */
+    /* FIELD 2026-10-23 (two failed rungs taught the ladder): prio 13
+     * does not just slow the lane — it STALLS BRING-UP. Evidence: the
+     * tailscale lane dropped the moment this rung flashed (board offline,
+     * 100% ping loss, every captured boot frozen in audio init without
+     * reaching 'room node ready'): taskLVGL outranks the operator/node
+     * clients (11) that must run during boot, so init starves. prio 4
+     * starved the display instead. 7 is the field-proven compromise:
+     * lane boots and lives, display beats housekeeping (5/6/4); the
+     * residual post-call churn (ml_wg_mgr 24-27%) is being fixed at its
+     * source (DISCO registry hygiene + retry backoff), after which even
+     * the default 4 would be safe. The HTTPD (CONFIG_ML_ENABLE_CONFIG_HTTPD)
+     * gives /api/peers/allowed as a manual trim in the meantime. */
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
         .buffer_size = BSP_LCD_DRAW_BUFF_SIZE,
@@ -88,7 +85,7 @@ static lv_display_t *waveshare_display_start(void *ctx)
             .buff_dma = false,
             .buff_spiram = true,
         }};
-    cfg.lvgl_port_cfg.task_priority = 13;
+    cfg.lvgl_port_cfg.task_priority = 7;
     lv_display_t *display = bsp_display_start_with_config(&cfg);
     if (display == NULL || !bsp_display_lock(0)) {
         return NULL;
