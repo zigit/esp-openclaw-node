@@ -65,7 +65,28 @@ static void align_sh8601_flush(lv_event_t *event)
 static lv_display_t *waveshare_display_start(void *ctx)
 {
     (void)ctx;
-    lv_display_t *display = bsp_display_start();
+    /* FIELD 2026-10-23 (Fredrik: sluggish screen, unresponsive touch after
+     * calls): the BSP default LVGL task priority is 4 — below ml_wg_mgr,
+     * ml_coord, ml_derp_tx and ml_net_io (all prio 11), which burn 24-27%
+     * CPU in sustained DISCO/retry churn after every call (measured by the
+     * idle CPU probe: IDLE 67-70% pre-call, ml_wg_mgr=26% + IDLE0=30%
+     * post-call). taskLVGL at 4 loses that race and the display crawls.
+     * 7 lifts it above housekeeping (afe_worker 5, talk_teardown 6,
+     * ts_manager 4) while staying below every task that carries data
+     * (audio 10-18, websocket 15, network 11, udp_rx 23): bursty short
+     * flushes win whenever nothing data-carrying is ready, and the lane
+     * keeps its headroom. Buffers/caps copied verbatim from the BSP's own
+     * bsp_display_start() so nothing else changes. */
+    bsp_display_cfg_t cfg = {
+        .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
+        .buffer_size = BSP_LCD_DRAW_BUFF_SIZE,
+        .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
+        .flags = {
+            .buff_dma = false,
+            .buff_spiram = true,
+        }};
+    cfg.lvgl_port_cfg.task_priority = 7;
+    lv_display_t *display = bsp_display_start_with_config(&cfg);
     if (display == NULL || !bsp_display_lock(0)) {
         return NULL;
     }
