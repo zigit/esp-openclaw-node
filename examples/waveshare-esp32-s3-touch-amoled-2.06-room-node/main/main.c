@@ -2,10 +2,12 @@
 #include "tailscale_manager.h"
 
 #include "bsp/esp-bsp.h"
+#include "bsp/touch.h"
 #include "esp_check.h"
 #include "esp_codec_dev_defaults.h"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
+#include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -251,6 +253,57 @@ static esp_err_t waveshare_audio_open(
     return ESP_OK;
 }
 
+/* FIELD 2026-10-23 (touch A/B verdict): Waveshare's factory firmware drives
+ * the SAME FT3168 with the SAME esp_lcd_touch_ft5x06 driver, same pins, same
+ * 400kHz - and touch works there, while every build since the 2026-10-22
+ * 19:58 sdkconfig regeneration reads nothing (the indev poll diagnostic
+ * showed FT5x06 I2C read error x22). Hardware is PROVEN good. This probe
+ * instruments our side of that regression: a second device handle on the
+ * same bus polling the FT5x06 registers directly every 5s, plus the
+ * INT(38)/RST(9) GPIO levels + the BSP io handle's own state. It separates:
+ *   - chip ABSENT from bus (NACK at 0x38)   -> power/reset-state issue
+ *   - chip PRESENT but regs read garbage    -> config/driver-state issue
+ * Runs from an esp_timer (reads only), WARNING line per probe so it is
+ * visible under the serial-discipline log gates. */
+#define TOUCH_PROBE_I2C_ADDR 0x38   /* FT5x06/FT3168 default */
+static esp_lcd_touch_handle_t s_tp_probe_tp;   /* factory-path touch handle on the BSP bus */
+static esp_timer_handle_t s_tp_probe_timer;
+static esp_lcd_touch_handle_t s_tp_probe_tp;   /* factory-path touch handle on the BSP bus */
+
+static void touch_probe_tick_cb(void *arg)
+{
+    (void)arg;
+    int int_lvl = gpio_get_level((gpio_num_t)BSP_LCD_TOUCH_INT);
+    int rst_lvl = gpio_get_level((gpio_num_t)BSP_LCD_TOUCH_RST);
+    if (s_tp_probe_tp == NULL) {
+        /* One-shot every 30s until it succeeds: the factory path itself —
+         * bsp_touch_new creates a second touch device on the BSP's OWN I2C
+         * bus (same pins, same driver, same 0x38 init sequence as the
+         * factory firmware). If this fails, the chip NACKs on our bus; if
+         * the reset line is held low, that is the reason. */
+        esp_err_t err = bsp_touch_new(NULL, &s_tp_probe_tp);
+        ESP_LOGW(TAG, "[tp_probe] bsp_touch_new -> %s (int=%d rst=%d)",
+                 esp_err_to_name(err), int_lvl, rst_lvl);
+        if (err != ESP_OK) { s_tp_probe_tp = NULL; return; }
+    }
+    esp_err_t err = esp_lcd_touch_read_data(s_tp_probe_tp);
+    ESP_LOGW(TAG, "[tp_probe] read -> %s (int=%d rst=%d)",
+             esp_err_to_name(err), int_lvl, rst_lvl);
+}
+
+static void touch_probe_start(void)
+{
+    if (s_tp_probe_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = touch_probe_tick_cb,
+            .name = "tp_probe",
+        };
+        if (esp_timer_create(&args, &s_tp_probe_timer) != ESP_OK) return;
+    }
+    esp_timer_start_periodic(s_tp_probe_timer, 5000000);
+    ESP_LOGW(TAG, "[tp_probe] armed: factory-path bsp_touch_new + read on the BSP bus, 5s period");
+}
+
 void app_main(void)
 {
     /* FIELD 2026-10-21 (Fredrik): install the cached gateway name -> IP
@@ -305,6 +358,12 @@ void app_main(void)
         },
     };
     ESP_ERROR_CHECK(esp_openclaw_room_node_start(&config));
+
+    /* FIELD 2026-10-23 (touch A/B): instrument OUR side of the touch
+     * regression (factory firmware = touch works; ours since the 19:58
+     * regen = NACK). Arms AFTER the room node start so the BSP's own bus
+     * claim and the display pipeline are settled first. */
+    touch_probe_start();
 
     /* Tailnet lane: connectivity layer only — the gateway URI and its
      * credentials stay provisioning items (NVS, USB setup flow). The

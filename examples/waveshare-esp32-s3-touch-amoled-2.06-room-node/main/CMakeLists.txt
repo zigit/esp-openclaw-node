@@ -16,6 +16,7 @@ idf_component_register(
         esp_webrtc
         esp_wifi
         espressif__esp_codec_dev
+        espressif__esp_lcd_touch
         freertos
         lvgl__lvgl
         media_lib_utils
