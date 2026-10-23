@@ -111,6 +111,17 @@ static lv_display_t *waveshare_display_start(void *ctx)
     lv_display_set_buffers(
         display, draw_a, draw_b, (uint32_t)draw_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_add_event_cb(display, align_sh8601_flush, LV_EVENT_INVALIDATE_AREA, NULL);
+    /* FIELD 2026-10-23: the touch-poll DIAGNOSTIC (lv_indev_set_mode TIMER)
+     * was REVERTED after one run: it proved the FT5x06 fails every I2C read
+     * ('FT5x06: I2C read error!' x22 at t=1730ms), but esp_lvgl_port's
+     * lvgl_port_touchpad_read wraps the read in ESP_ERROR_CHECK
+     * (esp_lvgl_port_touch.c:127), so in poll mode EVERY failed read
+     * abort()ed the board -> bootloop. In EVENT mode the read only runs on
+     * INT events, so a never-firing INT line + failing I2C reads are
+     * silently hidden (why touch looked 'silent' all along). FINDING:
+     * the touch controller (or its bus power/wiring/pull-ups) does not
+     * answer on I2C. Next step is hardware-side: check touch FPC/connector
+     * + 3.3V on the touch rail + I2C pull-ups on the FT5x06 bus. */
     bsp_display_unlock();
     return display;
 }
