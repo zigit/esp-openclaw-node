@@ -289,6 +289,13 @@ static TaskHandle_t talk_start_worker;
  * esp_timer — no new task. Callback does heap reads only, timer-safe. */
 static esp_timer_handle_t talk_heap_timer;
 static void talk_heap_tick_cb(void *arg) { (void)arg; room_heap_census_tick(); }
+/* Idle CPU-share probe (FIELD 2026-10-23, Fredrik: sluggish screen,
+ * unresponsive touch): every 60s name the top-3 CPU consumers whether or
+ * not a call is running. room_talk_cpu is call-gated, so an idle hog
+ * starving taskLVGL (prio 4) was invisible. Heap reads + runtime-stats
+ * counters only — timer-safe, no allocation. */
+static esp_timer_handle_t idle_cpu_timer;
+static void idle_cpu_tick_cb(void *arg) { (void)arg; room_cpu_probe_tick(); }
 /* Timer and queued operator work are guarded by state_lock. The existing
  * internal-stack supervisor also performs NVS-backed operator startup. */
 static esp_timer_handle_t operator_start_timer;
@@ -1853,5 +1860,20 @@ esp_err_t esp_openclaw_room_node_start(const esp_openclaw_room_node_config_t *co
      * moment (everything resident, nothing fragmented yet). Diffs against
      * post-teardown inventory name stack growth and shard drift. */
     room_heap_census_log("boot_ready");
+
+    /* Always-on idle CPU probe (60s period): the eater of a sluggish
+     * display names itself. First fire seeds the runtime-stats baseline. */
+    if (idle_cpu_timer == NULL) {
+        const esp_timer_create_args_t cpu_args = {
+            .callback = idle_cpu_tick_cb,
+            .name = "idle_cpu_tick",
+        };
+        if (esp_timer_create(&cpu_args, &idle_cpu_timer) != ESP_OK) {
+            idle_cpu_timer = NULL;
+            ESP_LOGW(TAG, "idle CPU probe not created");
+        } else {
+            esp_timer_start_periodic(idle_cpu_timer, 60000000);
+        }
+    }
     return ESP_OK;
 }

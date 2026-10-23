@@ -23,6 +23,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include <string.h>
 
 #if CONFIG_FREERTOS_USE_TRACE_FACILITY
 #include "freertos/FreeRTOS.h"
@@ -104,6 +105,75 @@ static void census_per_task(const char *stage, const char *tag)
  * captures lost their inventory this way). Bound ~40 tasks x status. */
 #define CENSUS_MAX_TASK_STAT 40
 static TaskStatus_t s_task_stat[CENSUS_MAX_TASK_STAT];
+#endif
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
+/* FIELD 2026-10-23 (Fredrik: sluggish screen, unresponsive touch): name the
+ * eater at IDLE, not only mid-call. room_talk_cpu is call-gated, so an idle
+ * CPU hog (task starving taskLVGL at prio 4) was invisible. Same diff scheme
+ * as the call tick: per-task ulRunTimeCounter deltas over the window, top-3
+ * as a percentage of total. Needs CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+ * (pinned in sdkconfig.defaults 2026-10-23 after the rm-sdkconfig loss).
+ * Static buffers: runs from esp_timer context at the quietest times, but
+ * allocation-free is the house rule for census work. */
+#define ROOM_CPU_PROBE_MAX 48
+static TaskStatus_t s_cpu_snap[ROOM_CPU_PROBE_MAX];
+static TaskStatus_t s_cpu_prev[ROOM_CPU_PROBE_MAX];
+static UBaseType_t s_cpu_prev_n;
+static uint32_t s_cpu_prev_total;
+
+void room_cpu_probe_tick(void)
+{
+    uint32_t total_now = 0;
+    UBaseType_t n = uxTaskGetSystemState(s_cpu_snap, ROOM_CPU_PROBE_MAX, &total_now);
+    if (n == 0 || total_now == 0) return;
+    if (s_cpu_prev_n == 0 || s_cpu_prev_total == 0) {
+        /* First sample only seeds the baseline. */
+        memcpy(s_cpu_prev, s_cpu_snap, n * sizeof(TaskStatus_t));
+        s_cpu_prev_n = n;
+        s_cpu_prev_total = total_now;
+        return;
+    }
+    uint32_t dtotal = total_now - s_cpu_prev_total;
+    if (dtotal == 0) return;
+    UBaseType_t top_i[3] = {0, 0, 0};
+    uint32_t top_d[3] = {0, 0, 0};
+    for (UBaseType_t i = 0; i < n; i++) {
+        uint32_t d = 0;
+        for (UBaseType_t j = 0; j < s_cpu_prev_n; j++) {
+            if (s_cpu_prev[j].xHandle == s_cpu_snap[i].xHandle) {
+                uint32_t c_now = s_cpu_snap[i].ulRunTimeCounter;
+                uint32_t c_prev = s_cpu_prev[j].ulRunTimeCounter;
+                if (c_now > c_prev) d = c_now - c_prev;
+                break;
+            }
+        }
+        if (d > top_d[0]) {
+            top_d[2] = top_d[1]; top_i[2] = top_i[1];
+            top_d[1] = top_d[0]; top_i[1] = top_i[0];
+            top_d[0] = d; top_i[0] = i;
+        } else if (d > top_d[1]) {
+            top_d[2] = top_d[1]; top_i[2] = top_i[1];
+            top_d[1] = d; top_i[1] = i;
+        } else if (d > top_d[2]) {
+            top_d[2] = d; top_i[2] = i;
+        }
+    }
+    ESP_LOGW(HEAP_CENSUS_TAG,
+             "[room_cpu] top: %s=%u%% %s=%u%% %s=%u%% (win=%ums)",
+             s_cpu_snap[top_i[0]].pcTaskName,
+             (unsigned)(top_d[0] * 100 / dtotal),
+             s_cpu_snap[top_i[1]].pcTaskName,
+             (unsigned)(top_d[1] * 100 / dtotal),
+             s_cpu_snap[top_i[2]].pcTaskName,
+             (unsigned)(top_d[2] * 100 / dtotal),
+             (unsigned)dtotal);
+    memcpy(s_cpu_prev, s_cpu_snap, n * sizeof(TaskStatus_t));
+    s_cpu_prev_n = n;
+    s_cpu_prev_total = total_now;
+}
+#else
+void room_cpu_probe_tick(void) { }
 #endif
 
 void room_heap_census_tick(void)

@@ -86,6 +86,19 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # from vTaskSwitchContext) hit right after census teardown_end — the 2048-word default has
 # no headroom under heap pressure. 4096 words kills the crash class.
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+# --- per-task CPU-share telemetry (room_talk_cpu / room_cpu tick) ---
+# FIELD 2026-10-23 (regression, self-inflicted): the idle/call CPU share
+# telemetry reads ulRunTimeCounter deltas, which are only meaningful under
+# configGENERATE_RUN_TIME_STATS. That option lived ONLY in the generated
+# sdkconfig — never in the tracked defaults — so `rm -f sdkconfig && idf.py
+# build` silently reset it and room_talk_cpu stopped appearing (it still
+# logs, but 0 deltas make the guard skip the line). Same trap class as the
+# DNS hook below. USE_TRACE_FACILITY was already pinned; the stats counter
+# needs its own pin. ESP-timer clock: finer resolution options overflow in
+# minutes-to-hours; esp_timer is the IDF default and is what the previous
+# working build used for room_talk_cpu.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
 # Death-certificate guard (11:31 tick capture): pipeline reopen carves ~14KB internal
 # after transports are established; refuse admission below the zombie floor (3584).
 CONFIG_OPENCLAW_ROOM_TALK_MIN_LARGEST_BLOCK=3584
